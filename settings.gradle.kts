@@ -6,4 +6,5 @@ include(
     "services:api-gateway",
     "services:user-service",
     "services:wallet-service",
+    "services:market-service",
 )

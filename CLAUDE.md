@@ -16,3 +16,4 @@
 
 ## Caveats
 - Spring Boot 3.x is end-of-life; the project uses Spring Boot 4.1 (Jackson 3, modular starters, Testcontainers 2) with Spring Cloud 2025.1.3 : docs/caveats/spring-boot-4.md
+- db-scheduler on Spring Boot 4 needs `db-scheduler-spring-boot-4-starter` (16.12.0); the old starter is Boot 3 only : docs/caveats/db-scheduler.md

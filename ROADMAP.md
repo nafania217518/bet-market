@@ -84,12 +84,26 @@ Decisions and deferrals:
 - Deferred: JWT deny-list (needs logout), circuit breakers/retries (§8.1) — add with M4 when a slow
   downstream exists to test against.
 
-## M3 — Markets + db-scheduler (1–2 days)
+## M3 — Markets + db-scheduler (1–2 days) — ✅ done
 - Market Service: aggregate + state machine, admin CRUD, `scheduled_tasks` Flyway migration,
   `freeze-market` / `end-market` one-time tasks (idempotent, write via outbox), reschedule on PATCH of times.
 - Integration test: 2 app instances on one DB, task fires exactly once; crash-revive runs as no-op.
 
 Done when: create market with `freezeAt = now+30s` → `market.frozen` appears in Kafka.
+
+**Outcome (2026-10-08):** smoke creates a market with `freezeAt = now+30s`; `market.frozen` reaches
+Kafka 0.4 s after `freezeAt`. Market Service: 19 tests, 92% coverage. Full build: 76 tests.
+Decisions and deferrals:
+- `db-scheduler-spring-boot-4-starter` 16.12.0 (the old starter is Boot 3 only), `lock-and-fetch`.
+- Task instance id = market id; no task data. Schedule calls join the create transaction (tested).
+- Tests: 2 scheduler instances on one DB run each of 20 freeze tasks exactly once; a revived dead
+  execution runs as a no-op.
+- All six `market.*` events carry the full state (`MarketV1` with `version`). Consumers upsert and
+  drop older versions.
+- Writes lock the market row; no JPA `@Version`. `winningSide` is text `TRUE|FALSE`.
+- Gateway routes `POST/PATCH/DELETE /api/markets/**` to Market Service. `GET /api/markets/**` waits
+  for the Query Service (M6). Market Service also checks the `ADMIN` role itself.
+- Deferred: correlation id for scheduler-run events (empty now; M8), db-scheduler health indicator (M8).
 
 ## M4 — Bet saga (2–3 days) — the core of the project
 - Bet Service: local market snapshot from `market.*`, `Idempotency-Key`, sync reserve via `RestClient`,

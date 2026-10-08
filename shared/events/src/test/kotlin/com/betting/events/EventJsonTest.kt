@@ -50,4 +50,15 @@ class EventJsonTest {
         val read = EventJson.read(json)
         assertEquals(WalletCreatedV1(userId, 5), EventJson.payload(read, WalletCreatedV1::class))
     }
+
+    @Test
+    fun `all six market events share the MarketV1 payload and round-trip through the envelope`() {
+        val market = MarketV1(UUID.randomUUID(), "T", "D", "RESOLVED", "TRUE", Instant.parse("2026-01-01T00:00:00Z"), Instant.parse("2026-01-02T00:00:00Z"), 1, 10, 4)
+        val types = listOf(EventTypes.MARKET_CREATED, EventTypes.MARKET_UPDATED, EventTypes.MARKET_FROZEN, EventTypes.MARKET_ENDED, EventTypes.MARKET_RESOLVED, EventTypes.MARKET_CANCELLED)
+        assertEquals(listOf("market.created", "market.updated", "market.frozen", "market.ended", "market.resolved", "market.cancelled"), types)
+        types.forEach { type ->
+            val e = envelope.copy(eventType = type, aggregateId = market.marketId.toString(), payload = EventJson.toNode(market))
+            assertEquals(market, EventJson.payload(EventJson.read(EventJson.write(e)), MarketV1::class))
+        }
+    }
 }

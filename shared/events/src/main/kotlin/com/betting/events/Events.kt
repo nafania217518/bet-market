@@ -11,11 +11,31 @@ import kotlin.reflect.KClass
 object EventTypes {
     const val USER_REGISTERED = "user.registered"
     const val WALLET_CREATED = "wallet.created"
+    const val MARKET_CREATED = "market.created"
+    const val MARKET_UPDATED = "market.updated"
+    const val MARKET_FROZEN = "market.frozen"
+    const val MARKET_ENDED = "market.ended"
+    const val MARKET_RESOLVED = "market.resolved"
+    const val MARKET_CANCELLED = "market.cancelled"
 }
 
 data class UserRegisteredV1(val userId: UUID, val email: String, val displayName: String)
 
 data class WalletCreatedV1(val userId: UUID, val balance: Long)
+
+// Payload of every market.* event: the full market state after the change. Consumers upsert and drop stale versions.
+data class MarketV1(
+    val marketId: UUID,
+    val title: String,
+    val description: String,
+    val status: String,
+    val winningSide: String?,
+    val freezeAt: Instant,
+    val endAt: Instant,
+    val minBet: Long,
+    val maxBet: Long,
+    val version: Long,
+)
 
 data class EventEnvelope(
     val eventId: UUID,

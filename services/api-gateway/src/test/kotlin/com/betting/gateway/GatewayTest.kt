@@ -1,10 +1,9 @@
 package com.betting.gateway
 
-import org.springframework.http.HttpStatus
+import org.springframework.http.HttpMethod
 import java.time.Instant
 import java.util.UUID
 import kotlin.test.Test
-import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 
 class GatewayTest : GatewayTestBase() {
@@ -68,10 +67,33 @@ class GatewayTest : GatewayTestBase() {
         client.post().uri("/api/markets/1").headers { it.setBearerAuth(user) }.exchange().expectStatus().isForbidden
         client.patch().uri("/api/markets/1").headers { it.setBearerAuth(user) }.exchange().expectStatus().isForbidden
         client.delete().uri("/api/markets/1").headers { it.setBearerAuth(user) }.exchange().expectStatus().isForbidden
-        val status = client.post().uri("/api/markets/1").headers { it.setBearerAuth(admin) }.exchange()
-            .returnResult(String::class.java).status
-        assertNotEquals(HttpStatus.UNAUTHORIZED, status)
-        assertNotEquals(HttpStatus.FORBIDDEN, status)
+        client.post().uri("/api/markets/1").headers { it.setBearerAuth(admin) }.exchange().expectStatus().isOk
+    }
+
+    @Test
+    fun `admin POST api markets, PATCH and DELETE api markets id, and POST freeze and resolve are routed to the market service with identity headers`() {
+        val id = UUID.randomUUID().toString()
+        val admin = token(id, listOf("USER", "ADMIN"))
+        listOf(
+            HttpMethod.POST to "/api/markets",
+            HttpMethod.PATCH to "/api/markets/42",
+            HttpMethod.DELETE to "/api/markets/42",
+            HttpMethod.POST to "/api/markets/42/freeze",
+            HttpMethod.POST to "/api/markets/42/resolve",
+        ).forEach { (method, path) ->
+            client.method(method).uri(path).headers { it.setBearerAuth(admin) }.exchange()
+                .expectStatus().isOk
+                .expectBody()
+                .jsonPath("$.path").isEqualTo(path)
+                .jsonPath("$.method").isEqualTo(method.name())
+                .jsonPath("$.userId").isEqualTo(id)
+                .jsonPath("$.roles").isEqualTo("USER,ADMIN")
+        }
+    }
+
+    @Test
+    fun `GET api markets is not routed yet and returns 404`() {
+        client.get().uri("/api/markets").exchange().expectStatus().isNotFound
     }
 
     @Test

@@ -35,6 +35,11 @@ spring:
               predicates:
                 - Path=/api/wallets/me,/api/wallets/me/ledger
                 - Method=GET
+            - id: market-write
+              uri: ${MARKET_SERVICE_URL:http://localhost:8083}
+              predicates:
+                - Path=/api/markets,/api/markets/**
+                - Method=POST,PATCH,DELETE
 management:
   endpoints:
     web:

@@ -69,6 +69,7 @@ abstract class GatewayTestBase {
             val url = "http://127.0.0.1:${downstream.address.port}"
             r.add("USER_SERVICE_URL") { url }
             r.add("WALLET_SERVICE_URL") { url }
+            r.add("MARKET_SERVICE_URL") { url }
             r.add("spring.data.redis.host") { redis.host }
             r.add("spring.data.redis.port") { redis.getMappedPort(6379) }
         }

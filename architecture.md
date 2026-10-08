@@ -96,7 +96,7 @@ project legally trivial and lets you focus on distributed-systems concerns.
 | SQL store | PostgreSQL 16 | One instance, one database per service |
 | NoSQL store | MongoDB 7 | Read models, event audit log |
 | Cache | Redis 7 | Cache, rate limit, leaderboard ZSET, WebSocket session registry |
-| **Cluster scheduler** | **`db-scheduler` (kagkarlsson) + Spring Boot starter** | **Persistent `scheduled_tasks` table; guarantees single execution per task instance across all replicas** |
+| **Cluster scheduler** | **`db-scheduler` (kagkarlsson) + `db-scheduler-spring-boot-4-starter`** | **Persistent `scheduled_tasks` table; guarantees single execution per task instance across all replicas. Boot 4 needs the `-4-` starter (see `docs/caveats/db-scheduler.md`)** |
 | Event schema | JSON envelope + versioned Kotlin data classes in `shared/events` | No Schema Registry (stretch goal) |
 | Migrations | Flyway | One migration set per service |
 | Metrics | Micrometer + Spring Boot Actuator | `/actuator/prometheus` |
@@ -357,13 +357,14 @@ Market (aggregate root)                        Bet (aggregate root)
   description   text                            userId         UUID
   status        enum(OPEN|FROZEN|ENDED|         side           enum(TRUE|FALSE)
                      RESOLVED|CANCELLED)        amount         bigint (tokens)
-  winningSide   boolean NULL (set on RESOLVED)
+  winningSide   text NULL (TRUE|FALSE, set on RESOLVED)
   freezeAt      timestamptz                     status         enum(PENDING|ACCEPTED|
   endAt         timestamptz                                      CANCELLED|WON|LOST|REFUNDED)
   minBet        bigint                          reservationId  UUID
   maxBet        bigint                          idempotencyKey text UNIQUE
   createdBy     UUID                            placedAt       timestamptz
-  version       bigint (optimistic lock)        version        bigint
+  version       bigint (+1 per change; writes   version        bigint
+                take a row lock)
   createdAt     timestamptz
   updatedAt     timestamptz
                                               OutboxEvent (per service)
@@ -553,7 +554,7 @@ GET    /actuator/prometheus                           -> 200
 
 | Aspect | Detail |
 |---|---|
-| **Tech** | Spring Boot Web, Spring Data JPA, Spring Kafka, **db-scheduler-spring-boot-starter**, Flyway, PostgreSQL |
+| **Tech** | Spring Boot Web, Spring Data JPA, Spring Kafka, **db-scheduler-spring-boot-4-starter**, Flyway, PostgreSQL |
 | **Store** | `market-db` (PostgreSQL), `scheduled_tasks` (db-scheduler table) |
 | **Produces** | `market.created`, `market.updated`, `market.frozen`, `market.ended`, `market.resolved`, `market.cancelled` |
 | **Consumes** | — |
@@ -576,6 +577,15 @@ GET    /actuator/prometheus                           -> 200
   `winningSide`; that emits `market.resolved`, which is what triggers settlement.
 - Publishes `market.created`/`market.updated` with `freezeAt`/`endAt` so Bet Service can keep its
   local `market_snapshot`.
+- Every `market.*` event carries the full market state (`MarketV1`, including `version`).
+  Consumers upsert it and drop events with an older `version`.
+- Every write locks the market row (`SELECT ... FOR UPDATE`). The API and the scheduler tasks
+  cannot interleave on one market.
+- The task instance id is the market id. The tasks carry no data, so no Java serialization.
+- The `end-market` task on a market that is still `OPEN` (the freeze task was late) emits
+  `market.frozen` and then `market.ended`.
+- Errors: `404 MARKET_NOT_FOUND`, `409 INVALID_MARKET_STATE`, `400 VALIDATION_ERROR`,
+  `403 FORBIDDEN` when `X-User-Roles` has no `ADMIN` (defence in depth behind the gateway).
 
 **API**
 
@@ -645,7 +655,7 @@ GET    /actuator/prometheus                         -> 200
 
 | Aspect | Detail |
 |---|---|
-| **Tech** | Spring Boot, Spring Kafka, Spring Data JPA, **db-scheduler-spring-boot-starter**, Flyway, PostgreSQL |
+| **Tech** | Spring Boot, Spring Kafka, Spring Data JPA, **db-scheduler-spring-boot-4-starter**, Flyway, PostgreSQL |
 | **Store** | `settlement-db` (PostgreSQL: `settlement_bet`, settlement audit log, outbox), `scheduled_tasks` (db-scheduler) |
 | **Produces** | `settlement.started`, `payout.calculated`, `settlement.completed` |
 | **Consumes** | `market.resolved`, `market.cancelled`, `bet.placed`, `bet.cancelled` |
@@ -1005,49 +1015,30 @@ db-scheduler.polling-strategy-upper-limit-fraction-of-threads=1.0
 
 ```kotlin
 @Configuration
-class MarketSchedulingConfig {
-
-    // Each service call updates status + inserts the outbox row in one tx,
-    // and is a no-op if the market already left OPEN/FROZEN (safe on re-run).
+class MarketTasks {
+    // No task data: the instance id is the market id.
+    // Each handler locks the market, updates it and writes the outbox row in one tx.
+    // It is a no-op if the market already left the source state (safe on re-run).
     @Bean
-    fun freezeMarketTask(marketService: MarketService): OneTimeTask<MarketTaskData> =
-        Tasks.oneTime("freeze-market", MarketTaskData::class.java)
-            .execute { instance, _ -> marketService.freezeMarket(instance.data.marketId) }
+    fun freezeTask(service: MarketService): OneTimeTask<Void> =
+        Tasks.oneTime("freeze-market").execute { inst, _ -> service.freezeByScheduler(UUID.fromString(inst.id)) }
 
     @Bean
-    fun endMarketTask(marketService: MarketService): OneTimeTask<MarketTaskData> =
-        Tasks.oneTime("end-market", MarketTaskData::class.java)
-            .execute { instance, _ -> marketService.endMarket(instance.data.marketId) }
+    fun endTask(service: MarketService): OneTimeTask<Void> =
+        Tasks.oneTime("end-market").execute { inst, _ -> service.endByScheduler(UUID.fromString(inst.id)) }
 }
 ```
 
-```kotlin
-data class MarketTaskData(val marketId: UUID)
-```
-
-**Scheduling the tasks when a market is created:**
+**Scheduling the tasks when a market is created** (inside the create transaction; the starter
+wraps the `DataSource` in `TransactionAwareDataSourceProxy`, so the task rows commit or roll back
+with the market row):
 
 ```kotlin
-@Service
-class MarketScheduler(
-    private val scheduler: Scheduler
-) {
-    fun scheduleMarketLifecycle(market: Market) {
-        scheduler.schedule(
-            TaskDescriptor.of("freeze-market", MarketTaskData::class.java)
-                .instance("freeze-${market.id}")
-                .data(MarketTaskData(market.id))
-                .scheduledTo(market.freezeAt)
-        )
-        scheduler.schedule(
-            TaskDescriptor.of("end-market", MarketTaskData::class.java)
-                .instance("end-${market.id}")
-                .data(MarketTaskData(market.id))
-                .scheduledTo(market.endAt)
-        )
-    }
-}
+scheduler.scheduleIfNotExists(TaskInstance<Void>("freeze-market", market.id.toString()), market.freezeAt)
+scheduler.scheduleIfNotExists(TaskInstance<Void>("end-market", market.id.toString()), market.endAt)
 ```
+
+`PATCH` of `freezeAt`/`endAt` calls `scheduler.reschedule(TaskInstanceId.of(name, id), newTime)`.
 
 **Why `lock-and-fetch` for PostgreSQL:** the `lock-and-fetch` polling strategy uses
 `SELECT ... FOR UPDATE SKIP LOCKED`, which is a single-statement fetch-and-lock. This reduces

@@ -3,6 +3,8 @@
 # Talks only to the API gateway.
 # M1: register -> login -> wallet shows the starting balance.
 # M2: gateway auth (JWT), identity headers, correlation id, seeded admin.
+# M3: admin creates a market; db-scheduler freezes it at freezeAt; market.frozen reaches Kafka.
+# The Kafka check uses `docker compose exec`: Kafka has no route through the gateway.
 set -euo pipefail
 
 API="${API:-http://localhost:8080}"
@@ -10,12 +12,20 @@ STARTING_TOKENS="${STARTING_TOKENS:-1000}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-admin@bet-market.local}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin-password}"
 ADMIN_ID="00000000-0000-0000-0000-000000000001"
+FREEZE_IN="${FREEZE_IN:-30}"
+COMPOSE=(docker compose -f "$(dirname "$0")/../docker-compose.yml")
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 json_field() { sed -n "s/.*\"$1\":\"\{0,1\}\([^\",}]*\).*/\1/p"; }
 status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 
 # Print the JSON payload of a JWT (base64url, unpadded).
+# ISO-8601 UTC time N seconds from now (BSD and GNU date).
+iso_in() {
+  local t=$(( $(date +%s) + $1 ))
+  date -u -r "$t" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$t" +%Y-%m-%dT%H:%M:%SZ
+}
+
 jwt_payload() {
   local p
   p=$(cut -d. -f2 <<< "$1" | tr '_-' '/+')
@@ -68,4 +78,22 @@ ADMIN_TOKEN=$(curl -fs -X POST "$API/api/auth/login" -H 'Content-Type: applicati
 [ -n "$ADMIN_TOKEN" ] || fail "admin login failed"
 jwt_payload "$ADMIN_TOKEN" | grep -q '"ADMIN"' || fail "admin token has no ADMIN role"
 
-echo "OK: user $USER_ID has $BALANCE tokens; gateway auth works"
+echo "8. only an admin can create a market"
+MARKET="{\"title\":\"Smoke market\",\"description\":\"\",\"freezeAt\":\"$(iso_in "$FREEZE_IN")\",\"endAt\":\"$(iso_in 3600)\",\"minBet\":1,\"maxBet\":100}"
+[ "$(status -X POST "$API/api/markets" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d "$MARKET")" = 403 ] \
+  || fail "a USER token must not create a market"
+MARKET_ID=$(curl -fs -X POST "$API/api/markets" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d "$MARKET" | json_field marketId)
+[ -n "$MARKET_ID" ] || fail "admin could not create a market"
+
+echo "9. market.frozen for $MARKET_ID reaches Kafka (freezeAt = now + ${FREEZE_IN}s)"
+FROZEN=""
+for _ in $(seq 1 $(( FREEZE_IN / 5 + 12 ))); do
+  if "${COMPOSE[@]}" exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka:29092 \
+      --topic market.frozen --from-beginning --timeout-ms 5000 2>/dev/null | grep -q "$MARKET_ID"; then
+    FROZEN=yes; break
+  fi
+done
+[ -n "$FROZEN" ] || fail "market.frozen for $MARKET_ID not found in Kafka"
+
+echo "OK: user $USER_ID has $BALANCE tokens; gateway auth works; market $MARKET_ID froze on schedule"
