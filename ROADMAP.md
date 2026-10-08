@@ -224,12 +224,27 @@ Decisions and deferrals:
 - Config is per service: two `management` lines in each `application.yml`, not a shared fragment.
   The gateway does not use `shared:common`.
 
-## M9 — Kubernetes manifest (1–2 days)
+## M9 — Kubernetes manifest (1–2 days) ✅ done
 - Single `kubernetes_manifest.yaml`: Namespace, ConfigMap/Secret, StatefulSets for postgres/kafka/mongo/redis,
   Deployments + Services for the 9 services and frontend, Ingress, readiness/liveness via actuator probes,
   kafka-init + postgres-init as Jobs.
 - Run Market Service with 2 replicas to actually exercise db-scheduler's exactly-once claim.
 - Validate: `kubeconform` in CI + deploy to kind/k3d and run `scripts/smoke.sh` against the ingress.
+
+**Outcome (2026-10-09):** `scripts/k8s-up.sh` deploys to k3d 5.9.0 (k3s v1.36.4). The smoke test
+passes steps 1–21 through the Traefik ingress; steps 22–26 run only under compose.
+- Market Service runs 2 replicas. Across both pods, `dbscheduler_task_completions_total` shows one
+  freeze and one end, so each task ran once. Smoke step 12 now checks that `market.frozen` is
+  published exactly once.
+- kubeconform: 35 objects valid (`-strict`). CI runs `scripts/k8s-check.sh`, which also checks that
+  the embedded init scripts match `infra/` byte for byte.
+- The compose smoke still passes all 26 steps.
+Decisions and deferrals:
+- Traefik (built into k3s) instead of ingress-nginx, which was retired in March 2026.
+- Postgres init runs from `/docker-entrypoint-initdb.d`, not a separate Job. kafka-init is a Job.
+- One Ingress rule (`/` → frontend). nginx already proxies `/api` and `/ws` to the gateway.
+- No observability stack in Kubernetes. Secrets are dev values in the manifest.
+- user-service stays at 1 replica until its JWT key comes from a Secret.
 
 ## M10 — Stretch
 Tracing (OTLP + Tempo), Schema Registry + compatibility checks, Debezium outbox, load test (k6) with

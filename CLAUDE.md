@@ -23,3 +23,5 @@
 - Boot 4 removed `@AutoConfigureObservability`; tests that read `/actuator/prometheus` need `@AutoConfigureMetrics` from `spring-boot-micrometer-metrics-test` : docs/caveats/spring-boot-4.md
 - JSON logs need no logstash encoder: Boot's `logging.structured.format.console=logstash` is built in : docs/caveats/spring-boot-4.md
 - db-scheduler 16.12 exports `dbscheduler_task_*` metrics itself; its health key is `dbScheduler` : docs/caveats/spring-boot-4.md
+- ingress-nginx is retired (March 2026); the manifest uses Traefik, which k3s/k3d ship : docs/caveats/kubernetes.md
+- Kafka pods need `enableServiceLinks: false`: the image reads every `KAFKA_*` env var as broker config : docs/caveats/kubernetes.md

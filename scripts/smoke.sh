@@ -10,6 +10,8 @@
 # M7: nginx serves the SPA and proxies /api and /ws; a bet pushes live updates over STOMP (needs Node >= 22).
 # M8: Prometheus scrapes every service and exporter, alert rules pass their unit tests, the custom
 #     metrics reflect this run, Grafana has its dashboards, and services log JSON.
+# M9: with K8S_NAMESPACE set (scripts/k8s-up.sh), Kafka is reached with kubectl, the run goes through
+#     the ingress, Market Service runs 2 replicas, and the compose-only M8 steps are skipped.
 # The Kafka check uses `docker compose exec`: Kafka has no route through the gateway.
 set -euo pipefail
 
@@ -24,6 +26,12 @@ ADMIN_ID="00000000-0000-0000-0000-000000000001"
 FREEZE_IN="${FREEZE_IN:-30}"
 HOUSE_EDGE_BPS="${HOUSE_EDGE_BPS:-500}"
 COMPOSE=(docker compose -f "$(dirname "$0")/../docker-compose.yml")
+K8S_NAMESPACE="${K8S_NAMESPACE:-}"
+# kafka_exec <command...>: run a command in the Kafka container (compose) or pod (Kubernetes).
+kafka_exec() {
+  if [ -n "$K8S_NAMESPACE" ]; then kubectl -n "$K8S_NAMESPACE" exec -i kafka-0 -- "$@"
+  else "${COMPOSE[@]}" exec -T kafka "$@"; fi
+}
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 json_field() { sed -n "s/.*\"$1\":\"\{0,1\}\([^\",}]*\).*/\1/p"; }
@@ -43,8 +51,9 @@ jwt_payload() {
   base64 -d <<< "$p"
 }
 
-for _ in $(seq 1 60); do curl -fs "$API/actuator/health" > /dev/null && break; sleep 2; done
-curl -fs "$API/actuator/health" > /dev/null || fail "gateway is not up"
+# An API route, not /actuator/health: through nginx or an ingress only /api and /ws reach the gateway.
+for _ in $(seq 1 60); do curl -fs "$API/api/markets" > /dev/null && break; sleep 2; done
+curl -fs "$API/api/markets" > /dev/null || fail "gateway is not up"
 
 EMAIL="smoke-$(date +%s)-$RANDOM@example.com"
 PASSWORD="smoke-password-1"
@@ -148,15 +157,15 @@ bet "smoke-b-$RANDOM" 300 FALSE > /dev/null
 wallet_is $((STARTING_TOKENS - 300)) 0
 TOKEN=$A_TOKEN
 
-echo "12. market.frozen for $MARKET_ID reaches Kafka (freezeAt = now + ${FREEZE_IN}s)"
-FROZEN=""
+echo "12. market.frozen for $MARKET_ID reaches Kafka exactly once (freezeAt = now + ${FREEZE_IN}s)"
+FROZEN=0
 for _ in $(seq 1 $(( FREEZE_IN / 5 + 12 ))); do
-  if "${COMPOSE[@]}" exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka:29092 \
-      --topic market.frozen --from-beginning --timeout-ms 5000 2>/dev/null | grep -q "$MARKET_ID"; then
-    FROZEN=yes; break
-  fi
+  FROZEN=$(kafka_exec /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka:29092 \
+      --topic market.frozen --from-beginning --timeout-ms 5000 2>/dev/null | grep -c "$MARKET_ID" || true)
+  [ "$FROZEN" -gt 0 ] && break
 done
-[ -n "$FROZEN" ] || fail "market.frozen for $MARKET_ID not found in Kafka"
+[ "$FROZEN" -gt 0 ] || fail "market.frozen for $MARKET_ID not found in Kafka"
+[ "$FROZEN" = 1 ] || fail "market.frozen for $MARKET_ID was published $FROZEN times"
 
 echo "13. no bets after freeze"
 [ "$(status -X POST "$API/api/bets" -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: late-$RANDOM" \
@@ -227,6 +236,9 @@ node "$(dirname "$0")/ws-check.mjs" "$WEB" "$A_TOKEN" "$LIVE_ID" || fail "no liv
 # Cancel it: the bet is refunded, so the next run starts clean.
 [ "$(status -X DELETE "$API/api/markets/$LIVE_ID" -H "Authorization: Bearer $ADMIN_TOKEN")" = 204 ] || fail "could not cancel the live market"
 
+if [ -n "$K8S_NAMESPACE" ]; then
+  echo "22-26. skipped: the observability stack runs only in docker compose"
+else
 # prom <PromQL>: prints the first sample value of an instant query, or nothing.
 prom() {
   curl -fs --get "$PROM/api/v1/query" --data-urlencode "query=$1" \
@@ -264,5 +276,7 @@ echo "26. services log JSON"
 for svc in bet-service projection-service api-gateway; do
   "${COMPOSE[@]}" logs --no-log-prefix --tail 1 "$svc" | grep -q '^{"@timestamp"' || fail "$svc does not log JSON"
 done
+
+fi
 
 echo "OK: user $USER_ID has $BALANCE tokens; gateway auth works; market $MARKET_ID took bets, froze on schedule and paid $PAYOUT to the winner"

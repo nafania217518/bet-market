@@ -1,0 +1,662 @@
+# bet-market on a local k3d cluster. Same system as docker-compose.yml, minus the observability stack.
+# Images: `docker compose build`, then `k3d image import bet-market-<name>:latest -c <cluster>`.
+# Apply: kubectl apply -f kubernetes_manifest.yaml
+apiVersion: v1
+kind: Namespace
+metadata: { name: bet-market }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: bet-market-config, namespace: bet-market }
+data:
+  KAFKA_BOOTSTRAP: kafka:29092
+  REDIS_HOST: redis
+  MONGO_URI: mongodb://mongodb:27017/read_db
+  DB_USER: app
+  LOGGING_STRUCTURED_FORMAT_CONSOLE: logstash
+  USER_SERVICE_URL: http://user-service:8081
+  WALLET_SERVICE_URL: http://wallet-service:8082
+  MARKET_SERVICE_URL: http://market-service:8083
+  BET_SERVICE_URL: http://bet-service:8084
+  QUERY_SERVICE_URL: http://query-service:8087
+  NOTIFICATION_SERVICE_URL: ws://notification-service:8088
+---
+# Dev values only. Real clusters inject these from a secret store (e.g. External Secrets, Vault).
+apiVersion: v1
+kind: Secret
+metadata: { name: bet-market-secrets, namespace: bet-market }
+stringData:
+  POSTGRES_PASSWORD: postgres
+  DB_PASSWORD: app
+  ADMIN_EMAIL: admin@bet-market.local
+  ADMIN_PASSWORD: admin-password
+---
+# Byte-for-byte copy of infra/postgres/init/01-databases.sql.
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: postgres-init, namespace: bet-market }
+data:
+  01-databases.sql: |
+    -- One Postgres container, one logical database per service (architecture.md §10, §13.5).
+    -- The app user owns each database. Since Postgres 15, GRANT ALL ON DATABASE does not allow
+    -- CREATE in the public schema; ownership does.
+    CREATE USER app WITH PASSWORD 'app';
+
+    CREATE DATABASE user_db OWNER app;
+    CREATE DATABASE wallet_db OWNER app;
+    CREATE DATABASE market_db OWNER app;
+    CREATE DATABASE bet_db OWNER app;
+    CREATE DATABASE settlement_db OWNER app;
+---
+# Byte-for-byte copy of infra/kafka/create-topics.sh.
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: kafka-create-topics, namespace: bet-market }
+data:
+  create-topics.sh: |
+    #!/bin/sh
+    # Creates every Kafka topic from architecture.md §9, plus its .DLT counterpart. Idempotent.
+    # Also re-applies retention on existing topics, so a config change reaches old local volumes.
+    set -eu
+
+    BOOTSTRAP="${BOOTSTRAP:-kafka:29092}"
+    KT=/opt/kafka/bin/kafka-topics.sh
+    KC=/opt/kafka/bin/kafka-configs.sh
+    DAY=86400000
+
+    # name partitions retention_days ("inf" = keep forever)
+    # The Projection Service rebuilds the read model by replaying every topic it consumes
+    # (scripts/rebuild-read-model.sh). Those topics keep their events forever; otherwise a replay
+    # after the retention period loses data. DLT copies keep 30 days.
+    TOPICS="
+    user.registered 3 inf
+    user.updated 3 7
+    wallet.created 3 7
+    wallet.reserved 6 3
+    wallet.debited 6 inf
+    wallet.credited 6 inf
+    wallet.released 6 3
+    wallet.debit_failed 6 7
+    market.created 6 inf
+    market.updated 6 inf
+    market.frozen 6 inf
+    market.ended 6 inf
+    market.resolved 6 inf
+    market.cancelled 6 inf
+    bet.placed 6 inf
+    bet.cancelled 6 inf
+    bet.failed 6 3
+    settlement.started 3 30
+    payout.calculated 6 90
+    settlement.completed 3 inf
+    "
+
+    retention_ms() { [ "$1" = inf ] && echo -1 || echo $(($1 * DAY)); }
+
+    echo "$TOPICS" | while read -r name parts days; do
+      [ -z "$name" ] && continue
+      for t in "$name" "$name.DLT"; do
+        r=$(retention_ms "$days")
+        [ "$t" != "$name" ] && [ "$days" = inf ] && r=$((30 * DAY))
+        $KT --bootstrap-server "$BOOTSTRAP" --create --if-not-exists --topic "$t" \
+          --partitions "$parts" --replication-factor 1 --config "retention.ms=$r"
+        $KC --bootstrap-server "$BOOTSTRAP" --alter --entity-type topics --entity-name "$t" \
+          --add-config "retention.ms=$r" > /dev/null
+      done
+    done
+
+    $KT --bootstrap-server "$BOOTSTRAP" --list
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: postgres, namespace: bet-market }
+spec:
+  serviceName: postgres
+  selector: { matchLabels: { app: postgres } }
+  template:
+    metadata: { labels: { app: postgres } }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports: [{ containerPort: 5432 }]
+          env:
+            - { name: POSTGRES_USER, value: postgres }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: bet-market-secrets, key: POSTGRES_PASSWORD } }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            # The image runs these scripts once, on an empty volume. This replaces a separate postgres-init Job.
+            - { name: init, mountPath: /docker-entrypoint-initdb.d }
+          readinessProbe:
+            exec: { command: [sh, -c, pg_isready -U postgres -d settlement_db] }
+            periodSeconds: 5
+      volumes:
+        - name: init
+          configMap: { name: postgres-init }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 1Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: postgres, namespace: bet-market }
+spec:
+  selector: { app: postgres }
+  ports: [{ port: 5432 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: kafka, namespace: bet-market }
+spec:
+  serviceName: kafka
+  selector: { matchLabels: { app: kafka } }
+  template:
+    metadata: { labels: { app: kafka } }
+    spec:
+      # The image turns every KAFKA_* env var into broker config. Service links would inject
+      # KAFKA_PORT, KAFKA_SERVICE_HOST etc. for the `kafka` Service and break the broker.
+      enableServiceLinks: false
+      containers:
+        - name: kafka
+          image: apache/kafka:4.3.1
+          ports: [{ containerPort: 29092 }]
+          env:
+            - { name: KAFKA_NODE_ID, value: "1" }
+            - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
+            - { name: KAFKA_LISTENERS, value: "INTERNAL://:29092,CONTROLLER://:9093" }
+            - { name: KAFKA_ADVERTISED_LISTENERS, value: "INTERNAL://kafka:29092" }
+            - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT" }
+            - { name: KAFKA_INTER_BROKER_LISTENER_NAME, value: INTERNAL }
+            - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: CONTROLLER }
+            - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@localhost:9093" }
+            - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
+            - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
+            - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1" }
+            - { name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS, value: "0" }
+            - { name: KAFKA_AUTO_CREATE_TOPICS_ENABLE, value: "false" }
+            - { name: KAFKA_LOG_DIRS, value: /var/lib/kafka/data/logs }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/kafka/data }
+          readinessProbe:
+            exec: { command: [sh, -c, "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:29092 > /dev/null"] }
+            periodSeconds: 5
+            timeoutSeconds: 10
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 1Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: kafka, namespace: bet-market }
+spec:
+  selector: { app: kafka }
+  ports: [{ port: 29092 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: redis, namespace: bet-market }
+spec:
+  serviceName: redis
+  selector: { matchLabels: { app: redis } }
+  template:
+    metadata: { labels: { app: redis } }
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports: [{ containerPort: 6379 }]
+          volumeMounts:
+            - { name: data, mountPath: /data }
+          readinessProbe:
+            exec: { command: [redis-cli, ping] }
+            periodSeconds: 5
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 1Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: redis, namespace: bet-market }
+spec:
+  selector: { app: redis }
+  ports: [{ port: 6379 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: { name: mongodb, namespace: bet-market }
+spec:
+  serviceName: mongodb
+  selector: { matchLabels: { app: mongodb } }
+  template:
+    metadata: { labels: { app: mongodb } }
+    spec:
+      containers:
+        - name: mongodb
+          image: mongo:7
+          ports: [{ containerPort: 27017 }]
+          volumeMounts:
+            - { name: data, mountPath: /data/db }
+          readinessProbe:
+            exec: { command: [mongosh, --quiet, --eval, "db.adminCommand('ping').ok"] }
+            periodSeconds: 5
+            timeoutSeconds: 5
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 1Gi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: mongodb, namespace: bet-market }
+spec:
+  selector: { app: mongodb }
+  ports: [{ port: 27017 }]
+---
+# Creates the topics. Retries until Kafka is up; the script is idempotent.
+apiVersion: batch/v1
+kind: Job
+metadata: { name: kafka-init, namespace: bet-market }
+spec:
+  backoffLimit: 20
+  template:
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      containers:
+        - name: kafka-init
+          image: apache/kafka:4.3.1
+          command: [sh, /scripts/create-topics.sh]
+          env: [{ name: BOOTSTRAP, value: "kafka:29092" }]
+          volumeMounts: [{ name: scripts, mountPath: /scripts }]
+      volumes:
+        - name: scripts
+          configMap: { name: kafka-create-topics }
+---
+# 1 replica: the JWT signing key is generated per pod (see JwtIssuer.kt). Replicas would disagree.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: user-service, namespace: bet-market }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: user-service } }
+  template:
+    metadata: { labels: { app: user-service } }
+    spec:
+      containers:
+        - name: user-service
+          image: bet-market-user-service:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 8081 }]
+          envFrom: [{ configMapRef: { name: bet-market-config } }]
+          env:
+            - name: DB_URL
+              value: jdbc:postgresql://postgres:5432/user_db
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: bet-market-secrets, key: DB_PASSWORD } }
+            - name: ADMIN_EMAIL
+              valueFrom: { secretKeyRef: { name: bet-market-secrets, key: ADMIN_EMAIL } }
+            - name: ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: bet-market-secrets, key: ADMIN_PASSWORD } }
+          resources:
+            requests: { cpu: 100m, memory: 384Mi }
+            limits: { memory: 768Mi }
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8081 }
+            periodSeconds: 5
+            failureThreshold: 36
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8081 }
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8081 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: user-service, namespace: bet-market }
+spec:
+  selector: { app: user-service }
+  ports: [{ port: 8081 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: wallet-service, namespace: bet-market }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: wallet-service } }
+  template:
+    metadata: { labels: { app: wallet-service } }
+    spec:
+      containers:
+        - name: wallet-service
+          image: bet-market-wallet-service:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 8082 }]
+          envFrom: [{ configMapRef: { name: bet-market-config } }]
+          env:
+            - name: DB_URL
+              value: jdbc:postgresql://postgres:5432/wallet_db
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: bet-market-secrets, key: DB_PASSWORD } }
+          resources:
+            requests: { cpu: 100m, memory: 384Mi }
+            limits: { memory: 768Mi }
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8082 }
+            periodSeconds: 5
+            failureThreshold: 36
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8082 }
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8082 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: wallet-service, namespace: bet-market }
+spec:
+  selector: { app: wallet-service }
+  ports: [{ port: 8082 }]
+---
+# 2 replicas exercise db-scheduler's lock-and-fetch.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: market-service, namespace: bet-market }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: market-service } }
+  template:
+    metadata: { labels: { app: market-service } }
+    spec:
+      containers:
+        - name: market-service
+          image: bet-market-market-service:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 8083 }]
+          envFrom: [{ configMapRef: { name: bet-market-config } }]
+          env:
+            - name: DB_URL
+              value: jdbc:postgresql://postgres:5432/market_db
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: bet-market-secrets, key: DB_PASSWORD } }
+          resources:
+            requests: { cpu: 100m, memory: 384Mi }
+            limits: { memory: 768Mi }
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8083 }
+            periodSeconds: 5
+            failureThreshold: 36
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8083 }
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8083 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: market-service, namespace: bet-market }
+spec:
+  selector: { app: market-service }
+  ports: [{ port: 8083 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: bet-service, namespace: bet-market }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: bet-service } }
+  template:
+    metadata: { labels: { app: bet-service } }
+    spec:
+      containers:
+        - name: bet-service
+          image: bet-market-bet-service:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 8084 }]
+          envFrom: [{ configMapRef: { name: bet-market-config } }]
+          env:
+            - name: DB_URL
+              value: jdbc:postgresql://postgres:5432/bet_db
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: bet-market-secrets, key: DB_PASSWORD } }
+          resources:
+            requests: { cpu: 100m, memory: 384Mi }
+            limits: { memory: 768Mi }
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8084 }
+            periodSeconds: 5
+            failureThreshold: 36
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8084 }
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8084 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: bet-service, namespace: bet-market }
+spec:
+  selector: { app: bet-service }
+  ports: [{ port: 8084 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: settlement-service, namespace: bet-market }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: settlement-service } }
+  template:
+    metadata: { labels: { app: settlement-service } }
+    spec:
+      containers:
+        - name: settlement-service
+          image: bet-market-settlement-service:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 8085 }]
+          envFrom: [{ configMapRef: { name: bet-market-config } }]
+          env:
+            - name: DB_URL
+              value: jdbc:postgresql://postgres:5432/settlement_db
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: bet-market-secrets, key: DB_PASSWORD } }
+          resources:
+            requests: { cpu: 100m, memory: 384Mi }
+            limits: { memory: 768Mi }
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8085 }
+            periodSeconds: 5
+            failureThreshold: 36
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8085 }
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8085 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: settlement-service, namespace: bet-market }
+spec:
+  selector: { app: settlement-service }
+  ports: [{ port: 8085 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: projection-service, namespace: bet-market }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: projection-service } }
+  template:
+    metadata: { labels: { app: projection-service } }
+    spec:
+      containers:
+        - name: projection-service
+          image: bet-market-projection-service:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 8086 }]
+          envFrom: [{ configMapRef: { name: bet-market-config } }]
+          resources:
+            requests: { cpu: 100m, memory: 384Mi }
+            limits: { memory: 768Mi }
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8086 }
+            periodSeconds: 5
+            failureThreshold: 36
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8086 }
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8086 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: projection-service, namespace: bet-market }
+spec:
+  selector: { app: projection-service }
+  ports: [{ port: 8086 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: query-service, namespace: bet-market }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: query-service } }
+  template:
+    metadata: { labels: { app: query-service } }
+    spec:
+      containers:
+        - name: query-service
+          image: bet-market-query-service:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 8087 }]
+          envFrom: [{ configMapRef: { name: bet-market-config } }]
+          resources:
+            requests: { cpu: 100m, memory: 384Mi }
+            limits: { memory: 768Mi }
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8087 }
+            periodSeconds: 5
+            failureThreshold: 36
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8087 }
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8087 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: query-service, namespace: bet-market }
+spec:
+  selector: { app: query-service }
+  ports: [{ port: 8087 }]
+---
+# 1 replica: in-memory STOMP broker.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: notification-service, namespace: bet-market }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: notification-service } }
+  template:
+    metadata: { labels: { app: notification-service } }
+    spec:
+      containers:
+        - name: notification-service
+          image: bet-market-notification-service:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 8088 }]
+          envFrom: [{ configMapRef: { name: bet-market-config } }]
+          resources:
+            requests: { cpu: 100m, memory: 384Mi }
+            limits: { memory: 768Mi }
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8088 }
+            periodSeconds: 5
+            failureThreshold: 36
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8088 }
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8088 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: notification-service, namespace: bet-market }
+spec:
+  selector: { app: notification-service }
+  ports: [{ port: 8088 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: api-gateway, namespace: bet-market }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: api-gateway } }
+  template:
+    metadata: { labels: { app: api-gateway } }
+    spec:
+      containers:
+        - name: api-gateway
+          image: bet-market-api-gateway:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 8080 }]
+          envFrom: [{ configMapRef: { name: bet-market-config } }]
+          resources:
+            requests: { cpu: 100m, memory: 384Mi }
+            limits: { memory: 768Mi }
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8080 }
+            periodSeconds: 5
+            failureThreshold: 36
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8080 }
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8080 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: api-gateway, namespace: bet-market }
+spec:
+  selector: { app: api-gateway }
+  ports: [{ port: 8080 }]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: frontend, namespace: bet-market }
+spec:
+  selector: { matchLabels: { app: frontend } }
+  template:
+    metadata: { labels: { app: frontend } }
+    spec:
+      containers:
+        - name: frontend
+          image: bet-market-frontend:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 80 }]
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 64Mi }
+          livenessProbe:
+            httpGet: { path: /, port: 80 }
+          readinessProbe:
+            httpGet: { path: /, port: 80 }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: frontend, namespace: bet-market }
+spec:
+  selector: { app: frontend }
+  ports: [{ port: 80 }]
+---
+# ingress-nginx is retired (March 2026). k3s ships Traefik as the Ingress controller.
+# nginx in the frontend pod proxies /api and /ws to api-gateway:8080.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: { name: bet-market, namespace: bet-market }
+spec:
+  ingressClassName: traefik
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: frontend, port: { number: 80 } } }

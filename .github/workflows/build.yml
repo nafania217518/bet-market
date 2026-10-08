@@ -16,3 +16,10 @@ jobs:
       - uses: gradle/actions/setup-gradle@v6
       # Unit + Testcontainers integration tests + JaCoCo 90% gate. Docker is preinstalled on ubuntu runners.
       - run: ./gradlew build --console=plain
+
+  kubeconform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Schema validation plus a byte check of the scripts embedded in ConfigMaps.
+      - run: scripts/k8s-check.sh

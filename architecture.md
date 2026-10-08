@@ -1328,6 +1328,30 @@ Each service runs its own Flyway migrations against its own database on startup.
 and Settlement Service each run a Flyway migration that creates their own `scheduled_tasks`
 table (the DDL from section 10) in their respective databases.
 
+### 13.6 Kubernetes (`kubernetes_manifest.yaml`)
+
+One multi-document file runs the same system on a cluster, without the observability stack.
+
+```text
+Namespace bet-market
+  ConfigMap bet-market-config, Secret bet-market-secrets (dev values)
+  ConfigMaps postgres-init, kafka-create-topics   byte copies of infra/ scripts (scripts/k8s-check.sh)
+  StatefulSets + Services  postgres, kafka (KRaft, 1 node), redis, mongodb   1Gi PVC each
+  Job kafka-init           runs create-topics.sh
+  Deployments + Services   the 9 services and frontend, named like the compose hosts
+                           market-service: 2 replicas (db-scheduler lock-and-fetch)
+                           user-service, notification-service: 1 replica (per-pod JWT key, in-memory broker)
+  Ingress bet-market       / -> frontend:80 (Traefik); nginx proxies /api and /ws to api-gateway
+```
+
+- The Postgres init SQL runs from `/docker-entrypoint-initdb.d` on the first start of an empty
+  volume. It replaces a separate postgres-init Job.
+- Probes use Spring Boot's `/actuator/health/liveness` and `/readiness` groups, with a startup probe.
+- `scripts/k8s-up.sh` creates a k3d cluster, imports the compose-built images, applies the manifest,
+  waits for every pod, and runs `scripts/smoke.sh` through the ingress (`K8S_NAMESPACE` mode).
+- CI runs `scripts/k8s-check.sh`: kubeconform `-strict` plus the ConfigMap byte check.
+- Caveats (retired ingress-nginx, Kafka service links): `docs/caveats/kubernetes.md`.
+
 ---
 
 ## 14. Repository layout
