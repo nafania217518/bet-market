@@ -76,4 +76,14 @@ class EventJsonTest {
         val move = WalletMovementV1(userId, bet.betId, 50, 1000, 50)
         assertEquals(move, EventJson.payload(EventJson.read(EventJson.write(envelope.copy(payload = EventJson.toNode(move)))), WalletMovementV1::class))
     }
+
+    @Test
+    fun `settlement events carry the payout list and the market totals`() {
+        assertEquals(listOf("payout.calculated", "settlement.completed"), listOf(EventTypes.PAYOUT_CALCULATED, EventTypes.SETTLEMENT_COMPLETED))
+        val marketId = UUID.randomUUID()
+        val payouts = PayoutCalculatedV1(marketId, listOf(PayoutV1(userId, 380, "WIN"), PayoutV1(UUID.randomUUID(), 10, "REFUND")))
+        assertEquals(payouts, EventJson.payload(EventJson.read(EventJson.write(envelope.copy(payload = EventJson.toNode(payouts)))), PayoutCalculatedV1::class))
+        val done = SettlementCompletedV1(marketId, "RESOLVED", "TRUE", 100, 300, 380, 20, 2)
+        assertEquals(done, EventJson.payload(EventJson.read(EventJson.write(envelope.copy(payload = EventJson.toNode(done)))), SettlementCompletedV1::class))
+    }
 }

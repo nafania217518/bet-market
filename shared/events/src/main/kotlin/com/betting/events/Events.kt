@@ -24,6 +24,8 @@ object EventTypes {
     const val WALLET_DEBITED = "wallet.debited"
     const val WALLET_RELEASED = "wallet.released"
     const val WALLET_CREDITED = "wallet.credited"
+    const val PAYOUT_CALCULATED = "payout.calculated"
+    const val SETTLEMENT_COMPLETED = "settlement.completed"
 }
 
 data class UserRegisteredV1(val userId: UUID, val email: String, val displayName: String)
@@ -60,6 +62,25 @@ data class BetV1(
 // Payload of wallet.reserved, wallet.debited, wallet.released and wallet.credited:
 // the moved amount and the wallet state after the move.
 data class WalletMovementV1(val userId: UUID, val betId: UUID?, val amount: Long, val balance: Long, val reserved: Long)
+
+// Payload of payout.calculated: one entry per user that gets tokens. Losers have no entry.
+// type: WIN (share of the pool) or REFUND (stake back).
+data class PayoutCalculatedV1(val marketId: UUID, val payouts: List<PayoutV1>)
+
+data class PayoutV1(val userId: UUID, val amount: Long, val type: String)
+
+// Payload of settlement.completed. outcome: RESOLVED|CANCELLED. Pools exclude refunded bets.
+// houseAmount = pools - paidOut to winners (edge + rounding remainder).
+data class SettlementCompletedV1(
+    val marketId: UUID,
+    val outcome: String,
+    val winningSide: String?,
+    val truePool: Long,
+    val falsePool: Long,
+    val paidOut: Long,
+    val houseAmount: Long,
+    val betCount: Int,
+)
 
 data class EventEnvelope(
     val eventId: UUID,

@@ -151,3 +151,16 @@ services:
     depends_on:
       <<: *backend-deps
       wallet-service: { condition: service_healthy }
+
+  settlement-service:
+    build: { context: ., args: { SERVICE: settlement-service } }
+    environment:
+      <<: *service-env
+      DB_URL: jdbc:postgresql://postgres:5432/settlement_db
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8085/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    depends_on: *backend-deps

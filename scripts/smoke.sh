@@ -5,6 +5,7 @@
 # M2: gateway auth (JWT), identity headers, correlation id, seeded admin.
 # M3: admin creates a market; db-scheduler freezes it at freezeAt; market.frozen reaches Kafka.
 # M4: bet saga: reserve -> bet.placed -> debit; idempotent replay; cancel refunds; no bets after freeze.
+# M5: second user bets the other side; admin resolves after endAt; settlement pays the winner.
 # The Kafka check uses `docker compose exec`: Kafka has no route through the gateway.
 set -euo pipefail
 
@@ -14,6 +15,7 @@ ADMIN_EMAIL="${ADMIN_EMAIL:-admin@bet-market.local}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin-password}"
 ADMIN_ID="00000000-0000-0000-0000-000000000001"
 FREEZE_IN="${FREEZE_IN:-30}"
+HOUSE_EDGE_BPS="${HOUSE_EDGE_BPS:-500}"
 COMPOSE=(docker compose -f "$(dirname "$0")/../docker-compose.yml")
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -80,7 +82,7 @@ ADMIN_TOKEN=$(curl -fs -X POST "$API/api/auth/login" -H 'Content-Type: applicati
 jwt_payload "$ADMIN_TOKEN" | grep -q '"ADMIN"' || fail "admin token has no ADMIN role"
 
 echo "8. only an admin can create a market"
-MARKET="{\"title\":\"Smoke market\",\"description\":\"\",\"freezeAt\":\"$(iso_in "$FREEZE_IN")\",\"endAt\":\"$(iso_in 3600)\",\"minBet\":1,\"maxBet\":100}"
+MARKET="{\"title\":\"Smoke market\",\"description\":\"\",\"freezeAt\":\"$(iso_in "$FREEZE_IN")\",\"endAt\":\"$(iso_in $((FREEZE_IN + 5)))\",\"minBet\":1,\"maxBet\":500}"
 [ "$(status -X POST "$API/api/markets" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d "$MARKET")" = 403 ] \
   || fail "a USER token must not create a market"
 MARKET_ID=$(curl -fs -X POST "$API/api/markets" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
@@ -90,17 +92,17 @@ MARKET_ID=$(curl -fs -X POST "$API/api/markets" -H "Authorization: Bearer $ADMIN
 wallet_is() { # wait until GET /wallets/me shows balance $1 and reserved $2
   local w=""
   for _ in $(seq 1 30); do
-    w=$(curl -fs "$API/api/wallets/me" -H "Authorization: Bearer $TOKEN")
+    w=$(curl -fs "$API/api/wallets/me" -H "Authorization: Bearer $TOKEN" || true)
     [ "$(json_field balance <<< "$w")" = "$1" ] && [ "$(json_field reserved <<< "$w")" = "$2" ] && return 0
     sleep 1
   done
   fail "wallet is $w, expected balance $1 and reserved $2"
 }
-bet() { # bet <idempotency-key> <amount> -> prints the response body; retries while the market snapshot is missing
+bet() { # bet <idempotency-key> <amount> [side] -> prints the response body; retries while the market snapshot is missing
   local body code
   for _ in $(seq 1 20); do
     body=$(curl -s -w '\n%{http_code}' -X POST "$API/api/bets" -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: $1" \
-      -H 'Content-Type: application/json' -d "{\"marketId\":\"$MARKET_ID\",\"side\":\"TRUE\",\"amount\":$2}")
+      -H 'Content-Type: application/json' -d "{\"marketId\":\"$MARKET_ID\",\"side\":\"${3:-TRUE}\",\"amount\":$2}")
     code=$(tail -n1 <<< "$body")
     [ "$code" = 202 ] && { sed '$d' <<< "$body"; return 0; }
     [ "$code" = 404 ] || fail "bet returned $code: $(sed '$d' <<< "$body")"
@@ -124,6 +126,20 @@ BET2=$(bet "smoke-$RANDOM-$RANDOM" 50 | json_field betId)
 curl -fs -X DELETE "$API/api/bets/$BET2" -H "Authorization: Bearer $TOKEN" | grep -q CANCELLED || fail "cancel failed"
 wallet_is $((STARTING_TOKENS - 100)) 0
 
+echo "11b. a second user bets 300 on FALSE"
+A_TOKEN=$TOKEN
+B_EMAIL="smoke-b-$(date +%s)-$RANDOM@example.com"
+curl -fs -X POST "$API/api/auth/register" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$B_EMAIL\",\"password\":\"$PASSWORD\",\"displayName\":\"Smoke B\"}" > /dev/null || fail "register B failed"
+TOKEN=$(curl -fs -X POST "$API/api/auth/login" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$B_EMAIL\",\"password\":\"$PASSWORD\"}" | json_field accessToken)
+[ -n "$TOKEN" ] || fail "login B failed"
+B_TOKEN=$TOKEN
+wallet_is "$STARTING_TOKENS" 0
+bet "smoke-b-$RANDOM" 300 FALSE > /dev/null
+wallet_is $((STARTING_TOKENS - 300)) 0
+TOKEN=$A_TOKEN
+
 echo "12. market.frozen for $MARKET_ID reaches Kafka (freezeAt = now + ${FREEZE_IN}s)"
 FROZEN=""
 for _ in $(seq 1 $(( FREEZE_IN / 5 + 12 ))); do
@@ -139,4 +155,22 @@ echo "13. no bets after freeze"
   -H 'Content-Type: application/json' -d "{\"marketId\":\"$MARKET_ID\",\"side\":\"TRUE\",\"amount\":10}")" = 409 ] \
   || fail "a bet after freeze was not rejected with 409"
 
-echo "OK: user $USER_ID has $BALANCE tokens; gateway auth works; market $MARKET_ID took bets and froze on schedule"
+echo "14. admin resolves TRUE once the end task has ended the market"
+RESOLVED=""
+for _ in $(seq 1 30); do
+  code=$(status -X POST "$API/api/markets/$MARKET_ID/resolve" -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H 'Content-Type: application/json' -d '{"winningSide":"TRUE"}')
+  [ "$code" = 200 ] && { RESOLVED=yes; break; }
+  [ "$code" = 409 ] || fail "resolve returned $code"
+  sleep 2
+done
+[ -n "$RESOLVED" ] || fail "market never reached ENDED"
+
+echo "15. settlement pays the winner; the loser keeps nothing"
+POOL=400 # A: 100 on TRUE (the 50 bet was cancelled), B: 300 on FALSE
+PAYOUT=$(( POOL * (10000 - HOUSE_EDGE_BPS) / 10000 ))
+TOKEN=$A_TOKEN; wallet_is $((STARTING_TOKENS - 100 + PAYOUT)) 0
+TOKEN=$B_TOKEN; wallet_is $((STARTING_TOKENS - 300)) 0
+TOKEN=$A_TOKEN
+
+echo "OK: user $USER_ID has $BALANCE tokens; gateway auth works; market $MARKET_ID took bets, froze on schedule and paid $PAYOUT to the winner"

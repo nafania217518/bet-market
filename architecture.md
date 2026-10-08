@@ -423,6 +423,16 @@ where:
 - rounding remainder is kept by the house (recorded as a ledger entry for auditability)
 
 If $P_{\text{win}} = 0$ (nobody picked the winning side), all stakes are refunded.
+If the losing pool is 0 (nobody to win from; this includes a single bettor), all stakes are
+refunded too. Otherwise winners would get less than their stake.
+
+Implementation rules (`Payouts.compute` in Settlement Service, a pure function):
+- Integer math only (`BigInteger`), edge in basis points (`HOUSE_EDGE_BPS`, default 500 = 5%):
+  `payout_u = floor(stake_u × P_total × (10000 − edgeBps) / (P_win × 10000))`.
+- A user's winning-side stakes are added before rounding.
+- Cancelled bets are ignored (the wallet refunded them on `bet.cancelled`).
+- Bets with `placedAt >= freezeAt` are refunded and left out of the pools.
+- `houseAmount = P_total − Σ payouts` (edge + rounding remainder). A full refund reports empty pools.
 
 ---
 
@@ -529,7 +539,8 @@ GET    /actuator/prometheus                                         -> 200
      Called synchronously by Bet Service.
   2. `commit` — converts a reservation into a real debit. Triggered by `bet.placed`.
   3. `release` — returns reserved tokens to balance. Triggered by `bet.cancelled` / `bet.failed`.
-- Credits payouts on `payout.calculated`.
+- Credits payouts on `payout.calculated`: one transaction per event, wallets locked in
+  `userId` order (no deadlocks). A missing wallet rolls back the whole event (retry, then DLT).
 - Guards concurrency with `SELECT ... FOR UPDATE` on the wallet row. No distributed lock: the
   row lock is already authoritative.
 - Enforces non-negative balance; reservation fails with `409 INSUFFICIENT_FUNDS` otherwise.
@@ -676,7 +687,7 @@ GET    /actuator/prometheus                         -> 200
 |---|---|
 | **Tech** | Spring Boot, Spring Kafka, Spring Data JPA, **db-scheduler-spring-boot-4-starter**, Flyway, PostgreSQL |
 | **Store** | `settlement-db` (PostgreSQL: `settlement_bet`, settlement audit log, outbox), `scheduled_tasks` (db-scheduler) |
-| **Produces** | `settlement.started`, `payout.calculated`, `settlement.completed` |
+| **Produces** | `payout.calculated`, `settlement.completed` (`settlement.started`: not emitted yet, no consumer) |
 | **Consumes** | `market.resolved`, `market.cancelled`, `bet.placed`, `bet.cancelled` |
 
 **Responsibilities**
@@ -694,6 +705,11 @@ GET    /actuator/prometheus                         -> 200
 - On `market.cancelled`: emits `payout.calculated` with `type = REFUND` for every stake.
 - Idempotent: re-processing `market.resolved` for an already-settled market is a no-op (unique
   constraint on `marketId` in `settlement-db`).
+- Flow: the `market.resolved`/`market.cancelled` listener inserts a `PENDING` settlement row and
+  schedules the one-time task `settle-market` (instance id = marketId) in one transaction. The
+  task locks the row, computes payouts, writes `settlement_payouts` (audit), marks it
+  `COMPLETED`, and appends both events to the outbox in one transaction. A failed run rolls
+  back and retries with exponential backoff.
 - Ordering: `bet.*` and `market.resolved` are different topics, so ordering between them is
   not guaranteed. Admin resolution happens after `endAt`,
   long after the last bet, so in practice all bets have arrived. A **db-scheduler** one-time
@@ -702,10 +718,11 @@ GET    /actuator/prometheus                         -> 200
 **API**
 
 ```text
-GET    /internal/settlements/{marketId}     -> 200 { status, pools, payouts[] }
-GET    /actuator/prometheus                -> 200
 GET    /actuator/health                    -> 200
 ```
+
+`GET /internal/settlements/{marketId}` is deferred: nothing reads it yet. The `settlements` and
+`settlement_payouts` tables hold the audit data.
 
 No public API — this service is purely event-driven.
 

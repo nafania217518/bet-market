@@ -6,6 +6,8 @@ import com.betting.common.OutboxWriter
 import com.betting.events.BetV1
 import com.betting.events.EventJson
 import com.betting.events.EventTypes
+import com.betting.events.PayoutCalculatedV1
+import com.betting.events.PayoutV1
 import com.betting.events.WalletMovementV1
 import jakarta.persistence.Entity
 import jakarta.persistence.Id
@@ -94,6 +96,16 @@ class WalletMoves(
         }
     }
 
+    // ponytail: one transaction per market payout list; split it if markets get thousands of winners.
+    fun payout(payouts: List<PayoutV1>) {
+        // Ascending userId lock order: two payout events never deadlock.
+        for (p in payouts.filter { it.amount > 0 }.sortedBy { it.userId }) {
+            val w = wallets.lockById(p.userId) ?: throw IllegalStateException("No wallet for user ${p.userId}")
+            w.balance += p.amount
+            move(w, null, p.amount, "CREDIT", EventTypes.WALLET_CREDITED)
+        }
+    }
+
     fun fail(betId: UUID) {
         val (w, r) = locked(betId) ?: return
         if (r.status == RESERVED) doRelease(w, r)
@@ -111,10 +123,10 @@ class WalletMoves(
         return w to reservations.findById(betId).orElseThrow()
     }
 
-    private fun move(w: Wallet, betId: UUID, amount: Long, type: String, eventType: String) {
+    private fun move(w: Wallet, betId: UUID?, amount: Long, type: String, eventType: String) {
         val now = Instant.now()
         w.updatedAt = now
-        reservations.findById(betId).ifPresent { it.updatedAt = now }
+        betId?.let { reservations.findById(it).ifPresent { r -> r.updatedAt = now } }
         ledger.save(LedgerEntry(userId = w.userId, betId = betId, type = type, amount = amount, balanceAfter = w.balance))
         outbox.append(eventType, w.userId.toString(), WalletMovementV1(w.userId, betId, amount, w.balance, w.reserved))
     }
@@ -157,5 +169,15 @@ class BetListener(private val idempotentConsumer: IdempotentConsumer, private va
         val envelope = EventJson.read(json)
         val betId = EventJson.payload(envelope, BetV1::class).betId
         idempotentConsumer.runOnce(envelope.eventId, "wallet-service") { action(betId) }
+    }
+}
+
+@Component
+class PayoutListener(private val idempotentConsumer: IdempotentConsumer, private val moves: WalletMoves) {
+    @KafkaListener(topics = [EventTypes.PAYOUT_CALCULATED])
+    fun onPayoutCalculated(json: String) {
+        val envelope = EventJson.read(json)
+        val payouts = EventJson.payload(envelope, PayoutCalculatedV1::class).payouts
+        idempotentConsumer.runOnce(envelope.eventId, "wallet-service") { moves.payout(payouts) }
     }
 }

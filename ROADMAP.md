@@ -130,7 +130,7 @@ Decisions and deferrals:
 - Deferred: reservation sweeper for the "release and bet-db both down" gap; `wallet.debit_failed`
   (the DLT covers it; alert in M8); `GET /api/wallets/me/ledger`.
 
-## M5 — Settlement (1–2 days)
+## M5 — Settlement (1–2 days) — ✅ done
 - Settlement Service: own bet table from events, on `market.resolved` compute pari-mutuel payouts
   (formula §7), remainder → house ledger entry, zero-winner → refund all, `market.cancelled` → refund.
   Unique `marketId` for idempotency; db-scheduler retry task.
@@ -138,6 +138,18 @@ Decisions and deferrals:
 - Unit test for payout math (rounding, zero-winner, single bettor, house edge). This is the money path — test it hardest.
 
 Done when: full lifecycle in smoke script: register 2 users → bet both sides → resolve → balances correct.
+
+**Outcome (2026-10-08):** smoke runs the full lifecycle: A bets 100 on TRUE, B bets 300 on FALSE,
+the market freezes and ends on schedule, the admin resolves TRUE, A ends at 1280 and B at 700
+(pool 400, 5% edge, house 20). Full build: 144 tests, every module ≥ 92% coverage (settlement 97%).
+Payout math: 14 unit tests, including 1000 random markets that must always balance.
+Decisions and deferrals:
+- No losers (incl. a single bettor) → refund all, like no winners. Otherwise winners lose money.
+- Payouts per user (stakes added before rounding), integer math, edge in basis points.
+- A settlement row (PK `marketId`) + db-scheduler task `settle-market` with exponential backoff.
+- Wallet credits one payout list per transaction, wallets locked in `userId` order.
+- Deferred: `settlement.started` and `GET /internal/settlements/{id}` (no consumer yet); bets that
+  arrive after settlement are not paid (admins resolve long after `endAt`; `ponytail:` comment).
 
 ## M6 — Read side (2 days)
 - Projection Service: `market_view`, `user_bet_view`, leaderboard; offset/eventId dedupe; Redis writes.
