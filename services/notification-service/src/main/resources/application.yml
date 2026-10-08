@@ -1,0 +1,12 @@
+spring:
+  application.name: notification-service
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
+    consumer:
+      group-id: notification-service
+      auto-offset-reset: latest # live pushes only, no replay
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+server.port: 8088
+notification.jwks-uri: ${USER_SERVICE_URL:http://localhost:8081}/.well-known/jwks.json
+management.endpoints.web.exposure.include: health

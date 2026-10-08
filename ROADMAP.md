@@ -174,12 +174,28 @@ Decisions and deferrals:
 - Replayed topics keep events forever (`retention.ms=-1`); the doc says why.
 - Deferred: `/internal/projections/status`, `roi` on the leaderboard, payout amount per bet.
 
-## M7 — Frontend + live updates (3–4 days)
+## M7 — Frontend + live updates (3–4 days) ✅ done
 - Notification Service: STOMP `/ws`, JWT on CONNECT, Kafka → `/topic/public.markets`, `/user/queue/*`.
   Single replica first; Redis session registry only when testing 2 replicas.
 - SPA (Vite, React, TanStack Query, Zustand, Tailwind): login, market list/detail, place/cancel bet with
   optimistic update, wallet + ledger, my bets, leaderboard, admin market form.
 - nginx container serving the build, proxied to the gateway.
+
+**Outcome (2026-10-08):** smoke steps 19–21 pass. nginx on `:80` serves the SPA and proxies
+`/api` and `/ws`. A bet pushes `bet.placed` to `/topic/public.markets` and `wallet.reserved` to
+the bettor's `/user/queue/wallet` through nginx, the gateway and Notification Service.
+A browser check covered register, a bet with a live pool and balance update, and the wallet ledger.
+Full build: 192 JVM tests, every module ≥ 90% coverage (notification 95%). SPA: 62 Vitest tests,
+99.6% statements.
+Decisions and deferrals:
+- Notification Service: plain WebSocket (no SockJS), single replica, simple broker, no Redis.
+  Anonymous sessions get public topics; `SUBSCRIBE` is limited to `/topic/public.*` and `/user/queue/*`.
+- New `GET /api/wallets/me/ledger` (it was deferred in M1).
+- SPA: React 19, Vite 8, TypeScript 7, Vitest 5. No router library: six hash routes in a small hook.
+  It needs Node 24 or 26 (see the caveat).
+- The SPA refetches 1 s after a push, because the projection can lag behind it.
+- Known limit: behind nginx, all anonymous users share one gateway rate-limit bucket (key = the nginx IP).
+  Trust `X-Forwarded-For` from nginx only, if that matters.
 
 ## M8 — Observability (1–2 days)
 - Actuator/Prometheus on every service (mostly config in a shared `application.yml` fragment).

@@ -82,6 +82,10 @@ spring:
                 - name: CircuitBreaker
                   args:
                     name: bet
+            - id: notification
+              uri: ${NOTIFICATION_SERVICE_URL:ws://localhost:8088}
+              predicates:
+                - Path=/ws,/ws/**
 resilience4j:
   circuitbreaker:
     configs:

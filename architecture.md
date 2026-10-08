@@ -85,7 +85,7 @@ project legally trivial and lets you focus on distributed-systems concerns.
 
 | Layer | Technology | Notes |
 |---|---|---|
-| Frontend | TypeScript, React 18, Vite | SPA, REST + STOMP over WebSocket |
+| Frontend | TypeScript, React 19, Vite 8 | SPA, REST + STOMP over WebSocket |
 | Frontend state | TanStack Query + Zustand | Server cache + small UI store |
 | Frontend styling | Tailwind CSS | Optional, keeps focus on architecture |
 | Gateway | Spring Cloud Gateway (WebFlux) | Routing, JWT, rate limiting |
@@ -839,10 +839,31 @@ GET /actuator/prometheus         -> 200
 **API**
 
 ```text
-WS   /ws                                  STOMP endpoint (SockJS fallback)
+WS   /ws                                  STOMP endpoint (plain WebSocket, no SockJS)
 GET  /actuator/prometheus                 -> 200
 GET  /actuator/health                     -> 200
 ```
+
+**Implementation notes (M7)**
+
+- The gateway routes `/ws` without a token check. A browser cannot send `Authorization` on the
+  WebSocket upgrade, so the JWT travels in the STOMP `CONNECT` frame.
+- `CONNECT` without a token gives an anonymous session: public topics only. An invalid or expired
+  token gets a STOMP `ERROR` frame.
+- `SUBSCRIBE` is allowed only to `/topic/public.*` and `/user/queue/*`. A raw `/queue/...`
+  destination is rejected, so a client cannot read another user's queue.
+- Messages are JSON with a `type` field (the event type):
+  - `market.*` → `/topic/public.markets` `{type, marketId, market}`.
+  - `bet.placed`/`bet.cancelled` → `/topic/public.markets` `{type, marketId}` and the bettor's
+    `/user/queue/notifications`.
+  - `wallet.*` → the owner's `/user/queue/wallet` `{type, betId, amount, balance, reserved, available}`.
+  - `payout.calculated` → each paid user's `/user/queue/notifications`.
+  - `settlement.completed` → `/topic/public.leaderboard` and `/topic/public.markets`.
+- The consumer group starts at the latest offset: pushes are live only, never replayed.
+- Single replica with the in-memory simple broker. Redis is not used yet. More replicas need a
+  broker relay or a Redis session registry.
+- A push can arrive before the projection updates the read model. The SPA refetches 1 s after a
+  push. There is no polling fallback: a lost push shows on the next page load.
 
 ---
 
@@ -1110,9 +1131,10 @@ database round-trips and is the recommended strategy for PostgreSQL at moderate 
 ### 11.5 Read-your-own-writes
 
 The SPA cannot immediately query the read model after placing a bet — projections are async.
-Mitigation: the `POST /api/bets` response returns the full optimistic bet object, and the SPA
-optimistically inserts it into its TanStack Query cache. The next refetch (1–2 s later)
-reconciles with the projection.
+Mitigation: the SPA inserts a `PENDING` bet into its TanStack Query cache at once and lowers the
+cached `available` balance. `POST /api/bets` returns `{betId, status}`; the SPA swaps in the real
+`betId` and refetches. On an error it rolls both changes back. Live pushes then reconcile the
+cache with the projection.
 
 ---
 

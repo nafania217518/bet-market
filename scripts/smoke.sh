@@ -7,10 +7,12 @@
 # M4: bet saga: reserve -> bet.placed -> debit; idempotent replay; cancel refunds; no bets after freeze.
 # M5: second user bets the other side; admin resolves after endAt; settlement pays the winner.
 # M6: the read side (Query Service via the gateway) shows the market, the bets and the leaderboard.
+# M7: nginx serves the SPA and proxies /api and /ws; a bet pushes live updates over STOMP (needs Node >= 22).
 # The Kafka check uses `docker compose exec`: Kafka has no route through the gateway.
 set -euo pipefail
 
 API="${API:-http://localhost:8080}"
+WEB="${WEB:-http://localhost}"
 STARTING_TOKENS="${STARTING_TOKENS:-1000}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-admin@bet-market.local}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin-password}"
@@ -201,5 +203,24 @@ TOKEN=$A_TOKEN
 echo "18. leaderboard: A +$((PAYOUT - 100)), B -300"
 eventually "A's net profit is not $((PAYOUT - 100))" net_profit_is "$USER_ID" $((PAYOUT - 100))
 eventually "B's net profit is not -300" net_profit_is "$B_ID" -300
+
+echo "19. nginx serves the SPA and proxies /api to the gateway"
+curl -fs "$WEB/" | grep -q 'id="root"' || fail "nginx does not serve the SPA at $WEB/"
+curl -fs "$WEB/#/markets/$MARKET_ID" | grep -q 'id="root"' || fail "nginx does not serve the SPA for a hash route"
+[ "$(status "$WEB/api/markets/$MARKET_ID")" = 200 ] || fail "nginx does not proxy /api to the gateway"
+
+echo "20. /ws upgrades to a WebSocket through nginx and the gateway"
+WS_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 --http1.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' "$WEB/ws" || true)
+[ "$WS_CODE" = 101 ] || fail "WebSocket handshake at $WEB/ws returned $WS_CODE"
+
+echo "21. a bet pushes a wallet update to its owner and a pool update to everyone"
+LIVE_MARKET="{\"title\":\"Smoke live market\",\"description\":\"\",\"freezeAt\":\"$(iso_in 120)\",\"endAt\":\"$(iso_in 125)\",\"minBet\":1,\"maxBet\":500}"
+LIVE_ID=$(curl -fs -X POST "$API/api/markets" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d "$LIVE_MARKET" | json_field marketId)
+[ -n "$LIVE_ID" ] || fail "admin could not create the live market"
+node "$(dirname "$0")/ws-check.mjs" "$WEB" "$A_TOKEN" "$LIVE_ID" || fail "no live update over /ws"
+# Cancel it: the bet is refunded, so the next run starts clean.
+[ "$(status -X DELETE "$API/api/markets/$LIVE_ID" -H "Authorization: Bearer $ADMIN_TOKEN")" = 204 ] || fail "could not cancel the live market"
 
 echo "OK: user $USER_ID has $BALANCE tokens; gateway auth works; market $MARKET_ID took bets, froze on schedule and paid $PAYOUT to the winner"

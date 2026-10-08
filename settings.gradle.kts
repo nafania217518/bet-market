@@ -11,4 +11,5 @@ include(
     "services:settlement-service",
     "services:projection-service",
     "services:query-service",
+    "services:notification-service",
 )

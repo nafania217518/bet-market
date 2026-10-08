@@ -19,3 +19,4 @@
 - Spring Boot 4.1 needs `spring-boot-starter-restclient` for `RestClient.Builder`; test starters hide a missing dependency : docs/caveats/spring-boot-4.md
 - Spring Boot 4 reads MongoDB settings from `spring.mongodb.*`; the old `spring.data.mongodb.*` is silently ignored : docs/caveats/spring-boot-4.md
 - db-scheduler on Spring Boot 4 needs `db-scheduler-spring-boot-4-starter` (16.12.0); the old starter is Boot 3 only : docs/caveats/db-scheduler.md
+- Frontend needs Node 24 LTS or 26 (local nvm default is 26.11.1); Vitest 5 and jsdom 30 reject Node 23 : docs/caveats/frontend-toolchain.md

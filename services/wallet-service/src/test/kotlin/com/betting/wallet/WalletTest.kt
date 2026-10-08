@@ -136,4 +136,65 @@ class WalletTest : IntegrationTest() {
             jdbc.sql("UPDATE wallets SET balance = -5 WHERE user_id = ?").param(userId).update()
         }
     }
+
+    private fun ledgerRow(userId: UUID, amount: Long, at: String) {
+        jdbc.sql("INSERT INTO wallets(user_id, balance) VALUES (?, 0) ON CONFLICT DO NOTHING").param(userId).update()
+        jdbc.sql("INSERT INTO ledger_entries(id, user_id, bet_id, type, amount, balance_after, created_at) VALUES (?, ?, NULL, 'CREDIT', ?, ?, ?::timestamptz)")
+            .params(UUID.randomUUID(), userId, amount, amount, at).update()
+    }
+
+    @Test
+    fun `GET wallets me ledger returns the caller's entries newest first`() {
+        val userId = UUID.randomUUID()
+        ledgerRow(userId, 1, "2026-01-01T00:00:00Z")
+        ledgerRow(userId, 2, "2026-01-03T00:00:00Z")
+        ledgerRow(userId, 3, "2026-01-02T00:00:00Z")
+        ledgerRow(UUID.randomUUID(), 9, "2026-01-04T00:00:00Z")
+        mvc.get("/api/wallets/me/ledger") { header("X-User-Id", userId.toString()) }.andExpect {
+            status { isOk() }
+            jsonPath("$.entries.length()") { value(3) }
+            jsonPath("$.entries[0].amount") { value(2) }
+            jsonPath("$.entries[1].amount") { value(3) }
+            jsonPath("$.entries[2].amount") { value(1) }
+            jsonPath("$.entries[0].id") { exists() }
+            jsonPath("$.entries[0].type") { value("CREDIT") }
+            jsonPath("$.entries[0].balanceAfter") { value(2) }
+            jsonPath("$.entries[0].createdAt") { exists() }
+            jsonPath("$.page") { value(0) }
+            jsonPath("$.size") { value(20) }
+        }
+    }
+
+    @Test
+    fun `GET wallets me ledger pages with page and size`() {
+        val userId = UUID.randomUUID()
+        (1..5).forEach { ledgerRow(userId, it.toLong(), "2026-01-0${it}T00:00:00Z") }
+        mvc.get("/api/wallets/me/ledger?page=1&size=2") { header("X-User-Id", userId.toString()) }.andExpect {
+            status { isOk() }
+            jsonPath("$.entries.length()") { value(2) }
+            jsonPath("$.entries[0].amount") { value(3) }
+            jsonPath("$.entries[1].amount") { value(2) }
+            jsonPath("$.page") { value(1) }
+            jsonPath("$.size") { value(2) }
+        }
+    }
+
+    @Test
+    fun `GET wallets me ledger returns an empty list for a user without entries`() {
+        mvc.get("/api/wallets/me/ledger") { header("X-User-Id", UUID.randomUUID().toString()) }.andExpect {
+            status { isOk() }
+            jsonPath("$.entries.length()") { value(0) }
+        }
+    }
+
+    @Test
+    fun `GET wallets me ledger returns 400 VALIDATION_ERROR for a bad X-User-Id, page below 0, or size outside 1-100`() {
+        val id = UUID.randomUUID().toString()
+        listOf("nope" to "", id to "?page=-1", id to "?size=0", id to "?size=101").forEach { (h, q) ->
+            mvc.get("/api/wallets/me/ledger$q") { header("X-User-Id", h) }.andExpect {
+                status { isBadRequest() }
+                jsonPath("$.code") { value("VALIDATION_ERROR") }
+            }
+        }
+    }
 }

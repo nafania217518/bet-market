@@ -34,6 +34,8 @@ class SecurityConfig {
                 it.pathMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                     .pathMatchers("/actuator/health/**", "/actuator/health").permitAll()
                     .pathMatchers(HttpMethod.POST, "/api/auth/**").permitAll()
+                    // The browser cannot send Authorization on the WebSocket upgrade; Notification Service checks the JWT in the STOMP CONNECT frame.
+                    .pathMatchers("/ws", "/ws/**").permitAll()
                     .pathMatchers(HttpMethod.GET, "/api/markets/**", "/api/leaderboard", "/api/stats/**").permitAll()
                     .pathMatchers(HttpMethod.POST, "/api/markets/**").hasRole("ADMIN")
                     .pathMatchers(HttpMethod.PATCH, "/api/markets/**").hasRole("ADMIN")
