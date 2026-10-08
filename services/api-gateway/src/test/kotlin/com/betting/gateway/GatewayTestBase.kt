@@ -19,6 +19,9 @@ import org.testcontainers.containers.GenericContainer
 import java.net.InetSocketAddress
 import java.time.Instant
 import java.util.Date
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureWebTestClient
@@ -46,18 +49,27 @@ abstract class GatewayTestBase {
 
         private val redis = GenericContainer("redis:7-alpine").withExposedPorts(6379).also { it.start() }
 
+        /** Calls per X-Fake-Key header value. */
+        val calls = ConcurrentHashMap<String, AtomicInteger>()
+
         private val downstream = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
+            executor = Executors.newCachedThreadPool()
             createContext("/") { ex ->
+                // Test behaviour: X-Fake-Sleep (ms), X-Fake-Fail (answer 503 for the first N calls of X-Fake-Key).
+                val n = ex.requestHeaders.getFirst("X-Fake-Key")?.let { calls.computeIfAbsent(it) { AtomicInteger() }.incrementAndGet() } ?: 0
+                ex.requestHeaders.getFirst("X-Fake-Sleep")?.let { Thread.sleep(it.toLong()) }
+                val fail = ex.requestHeaders.getFirst("X-Fake-Fail")?.toInt() ?: 0
                 val body = if (ex.requestURI.path == "/.well-known/jwks.json") {
                     JWKSet(testKey.toPublicJWK()).toString()
                 } else {
-                    fun h(n: String) = ex.requestHeaders.getFirst(n)?.let { "\"$it\"" } ?: "null"
+                    fun h(name: String) = ex.requestHeaders.getFirst(name)?.let { "\"$it\"" } ?: "null"
                     """{"method":"${ex.requestMethod}","path":"${ex.requestURI.path}","userId":${h("X-User-Id")},""" +
-                        """"roles":${h("X-User-Roles")},"correlationId":${h("X-Correlation-Id")}}"""
+                        """"roles":${h("X-User-Roles")},"correlationId":${h("X-Correlation-Id")},""" +
+                        """"idempotencyKey":${h("Idempotency-Key")}}"""
                 }
                 val bytes = body.toByteArray()
                 ex.responseHeaders.add("Content-Type", "application/json")
-                ex.sendResponseHeaders(200, bytes.size.toLong())
+                ex.sendResponseHeaders(if (n in 1..fail) 503 else 200, bytes.size.toLong())
                 ex.responseBody.use { it.write(bytes) }
             }
             start()
@@ -70,6 +82,7 @@ abstract class GatewayTestBase {
             r.add("USER_SERVICE_URL") { url }
             r.add("WALLET_SERVICE_URL") { url }
             r.add("MARKET_SERVICE_URL") { url }
+            r.add("BET_SERVICE_URL") { url }
             r.add("spring.data.redis.host") { redis.host }
             r.add("spring.data.redis.port") { redis.getMappedPort(6379) }
         }

@@ -7,4 +7,5 @@ include(
     "services:user-service",
     "services:wallet-service",
     "services:market-service",
+    "services:bet-service",
 )

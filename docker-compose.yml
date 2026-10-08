@@ -81,6 +81,7 @@ services:
       USER_SERVICE_URL: http://user-service:8081
       WALLET_SERVICE_URL: http://wallet-service:8082
       MARKET_SERVICE_URL: http://market-service:8083
+      BET_SERVICE_URL: http://bet-service:8084
     healthcheck:
       test: ["CMD", "curl", "-fs", "http://localhost:8080/actuator/health"]
       interval: 5s
@@ -92,6 +93,7 @@ services:
       user-service: { condition: service_healthy }
       wallet-service: { condition: service_healthy }
       market-service: { condition: service_healthy }
+      bet-service: { condition: service_healthy }
 
   user-service:
     build: { context: ., args: { SERVICE: user-service } }
@@ -133,3 +135,19 @@ services:
       retries: 30
       start_period: 20s
     depends_on: *backend-deps
+
+  bet-service:
+    build: { context: ., args: { SERVICE: bet-service } }
+    environment:
+      <<: *service-env
+      DB_URL: jdbc:postgresql://postgres:5432/bet_db
+      WALLET_SERVICE_URL: http://wallet-service:8082
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8084/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    depends_on:
+      <<: *backend-deps
+      wallet-service: { condition: service_healthy }

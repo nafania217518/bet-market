@@ -105,13 +105,30 @@ Decisions and deferrals:
   for the Query Service (M6). Market Service also checks the `ADMIN` role itself.
 - Deferred: correlation id for scheduler-run events (empty now; M8), db-scheduler health indicator (M8).
 
-## M4 — Bet saga (2–3 days) — the core of the project
+## M4 — Bet saga (2–3 days) — the core of the project — ✅ done
 - Bet Service: local market snapshot from `market.*`, `Idempotency-Key`, sync reserve via `RestClient`,
   bet + outbox in one tx, compensation (`release` + `bet.failed`), cancel while OPEN.
 - Wallet Service: reservation endpoints, commit on `bet.placed`, release on `bet.cancelled`/`bet.failed`,
   ledger append-only, non-negative balance check, DLT config (3 retries, backoff) in `shared/common`.
 - Tests: duplicate `bet.placed` delivery → single debit; concurrent bets on one wallet → no overdraft;
   persist failure after reserve → tokens released.
+
+**Outcome (2026-10-08):** smoke places a bet through `:8080`; the wallet debits it after `bet.placed`;
+an `Idempotency-Key` replay returns the same bet; a cancelled bet is refunded; a bet after freeze gets 409.
+Full build: 115 tests, every module ≥ 92% coverage (bet 93%, wallet 97%). One correlation id flows
+gateway → Bet → wallet HTTP call → `bet.placed` → `wallet.debited`.
+Required tests: duplicate `bet.placed` → one debit; 20 parallel reserves on 1000 → exactly 10 pass;
+persist failure after reserve → release + `bet.failed`; concurrent requests with one key → one bet.
+Decisions and deferrals:
+- Reservation id = bet id, so Bet Service can always release by bet id (also after a timeout).
+- No `PENDING` bet status: the bet is stored after the reserve succeeds, so it is `ACCEPTED`.
+- `Idempotency-Key` is unique per user, not global.
+- Wallet has no commit endpoint (commit only on `bet.placed`). `bet.cancelled` after a commit refunds.
+- DLT: `DefaultErrorHandler` in `shared/common`, 3 retries with exponential backoff, then `<topic>.DLT`.
+- Gateway: one circuit breaker per route, 5s timeout (504), open breaker 503, retries for GET only.
+- `RestClient.Builder` needs `spring-boot-starter-restclient` on Boot 4.1 (caveat recorded).
+- Deferred: reservation sweeper for the "release and bet-db both down" gap; `wallet.debit_failed`
+  (the DLT covers it; alert in M8); `GET /api/wallets/me/ledger`.
 
 ## M5 — Settlement (1–2 days)
 - Settlement Service: own bet table from events, on `market.resolved` compute pari-mutuel payouts

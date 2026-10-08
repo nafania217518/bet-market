@@ -352,18 +352,18 @@ db-scheduler       Market Svc        Kafka          Bet Svc       Settlement Svc
 
 ```text
 Market (aggregate root)                        Bet (aggregate root)
-  id            UUID                            id             UUID
+  id            UUID                            id             UUID (= wallet reservation id)
   title         text                            marketId       UUID
   description   text                            userId         UUID
-  status        enum(OPEN|FROZEN|ENDED|         side           enum(TRUE|FALSE)
+  status        enum(OPEN|FROZEN|ENDED|         side           text(TRUE|FALSE)
                      RESOLVED|CANCELLED)        amount         bigint (tokens)
   winningSide   text NULL (TRUE|FALSE, set on RESOLVED)
-  freezeAt      timestamptz                     status         enum(PENDING|ACCEPTED|
-  endAt         timestamptz                                      CANCELLED|WON|LOST|REFUNDED)
-  minBet        bigint                          reservationId  UUID
-  maxBet        bigint                          idempotencyKey text UNIQUE
-  createdBy     UUID                            placedAt       timestamptz
-  version       bigint (+1 per change; writes   version        bigint
+  freezeAt      timestamptz                     status         enum(ACCEPTED|CANCELLED|
+  endAt         timestamptz                                      WON|LOST|REFUNDED)
+  minBet        bigint                          idempotencyKey text, UNIQUE per user
+  maxBet        bigint                          placedAt       timestamptz
+  createdBy     UUID                            updatedAt      timestamptz
+  version       bigint (+1 per change; writes
                 take a row lock)
   createdAt     timestamptz
   updatedAt     timestamptz
@@ -443,7 +443,9 @@ If $P_{\text{win}} = 0$ (nobody picked the winning side), all stakes are refunde
 - Redis token-bucket rate limiting (per user and per IP).
 - CORS for the Vite dev server.
 - Propagates `X-Correlation-Id` (generates if missing) into every downstream call and into MDC.
-- Circuit breakers + retries for idempotent downstream calls.
+- Circuit breakers + retries for idempotent downstream calls. One breaker per route (a failing
+  service does not open another route). Timeout `DOWNSTREAM_TIMEOUT` (5s) -> 504; open breaker
+  -> 503. Only timeouts and connection errors count as failures. Only `GET` routes retry.
 
 **Routing table**
 
@@ -531,6 +533,14 @@ GET    /actuator/prometheus                                         -> 200
 - Guards concurrency with `SELECT ... FOR UPDATE` on the wallet row. No distributed lock: the
   row lock is already authoritative.
 - Enforces non-negative balance; reservation fails with `409 INSUFFICIENT_FUNDS` otherwise.
+- A `reservations` row per bet (id = `betId`, status `RESERVED|COMMITTED|RELEASED|REFUNDED`).
+  Every move locks the wallet row first, then changes the reservation, the wallet, one ledger
+  row and one outbox event in one transaction.
+- `bet.cancelled` releases a `RESERVED` reservation and refunds a `COMMITTED` one (`CREDIT`,
+  `wallet.credited`). `bet.placed` after `bet.cancelled` (topics are not ordered against each
+  other) finds `RELEASED` and does nothing.
+- `bet.placed`/`bet.cancelled` for an unknown reservation throws: 3 retries, then `<topic>.DLT`.
+- All `wallet.*` move events carry `WalletMovementV1` (amount + wallet state after the move).
 
 **API**
 
@@ -539,11 +549,10 @@ GET    /api/wallets/me                        (Bearer) -> 200 { balance, reserve
 GET    /api/wallets/me/ledger?page=&size=     (Bearer) -> 200 { entries[] }
 
 POST   /internal/wallets/{userId}/reservations
-       { betId, amount }                                  -> 201 { reservationId }
-POST   /internal/wallets/reservations/{id}/commit
-       { }                                                -> 200
-POST   /internal/wallets/reservations/{id}/release
-       { reason }                                         -> 200
+       { betId, amount }                                  -> 201 { reservationId = betId }
+                                    (same betId + amount again -> 200, no second hold)
+POST   /internal/wallets/reservations/{betId}/release     -> 200 (idempotent; 404 if unknown)
+       (no commit endpoint: commit happens only on bet.placed)
 
 GET    /actuator/prometheus                           -> 200
 ```
@@ -624,13 +633,19 @@ GET    /actuator/health                                          -> 200 (include
   (Bet Service clock). The time check covers the window before `market.frozen` arrives. Any bet
   that still slips through (`placedAt >= freezeAt`) is refunded by Settlement.
 - Cancellation is allowed only while the market is `OPEN` and before `freezeAt`.
-- Writes bet + outbox row in one PostgreSQL transaction (transactional outbox).
+- Writes bet + outbox row in one PostgreSQL transaction (transactional outbox). No database
+  transaction is open during the wallet HTTP call.
+- No `PENDING` status: the bet is stored only after the reservation succeeds, and the async
+  commit cannot fail for business reasons (§11.3). So the bet is `ACCEPTED` at once.
+- Bet events use `marketId` as the outbox aggregate id, so the Kafka key is `marketId` (§9).
+  All `bet.*` events carry `BetV1`.
+- The market snapshot is upserted from `MarketV1` and ignores events with an older `version`.
 
 **API**
 
 ```text
 POST   /api/bets              (Bearer, Idempotency-Key)
-       { marketId, side: "TRUE"|"FALSE", amount }   -> 202 { betId, status: "PENDING" }
+       { marketId, side: "TRUE"|"FALSE", amount }   -> 202 { betId, status: "ACCEPTED" }
 DELETE /api/bets/{id}         (Bearer)              -> 200 { status: "CANCELLED" }
 
 GET    /internal/bets/by-user/{userId}?page=        -> 200 { bets[] }
@@ -643,10 +658,14 @@ GET    /actuator/prometheus                         -> 200
 ```text
 400 VALIDATION_ERROR          amount < minBet or > maxBet, bad side
 404 MARKET_NOT_FOUND
+404 WALLET_NOT_FOUND
+404 BET_NOT_FOUND             also for another user's bet
 409 MARKET_NOT_OPEN           freezeAt passed or status != OPEN
 409 INSUFFICIENT_FUNDS
 409 DUPLICATE_BET             same idempotency key with different payload
 422 BET_ALREADY_CANCELLED
+503 WALLET_UNAVAILABLE        reserve timed out / failed; the stake is released
+503 BET_NOT_PLACED            bet not stored after reserve; the stake is released, bet.failed written
 ```
 
 ---
@@ -907,7 +926,7 @@ ws:user:{userId}:sessions        SET      sessionIds
 
 ```text
 market-db:     (status, freezeAt), (status, endAt)
-bet-db:        (marketId, status), (userId, placedAt DESC), UNIQUE (idempotencyKey)
+bet-db:        (marketId, status), (userId, placedAt DESC), UNIQUE (userId, idempotencyKey)
 wallet-db:     (userId), (betId), (userId, createdAt DESC)
 settlement-db: UNIQUE (marketId), settlement_bet (marketId)
 mongo:         market_view { status:1, endAt:1 }, user_bet_view { "bets.marketId":1 }
@@ -961,13 +980,17 @@ The bet-placement flow is a **choreographed saga**:
  4. Wallet Svc     -> wallet-db    : commit reservation -> debit     [tx]
  5. Wallet Svc     -> Kafka        : wallet.debited
 
- Failure at step 2 -> Bet Svc  -> Wallet Svc : release(reservationId)
-                   -> Bet Svc  -> Kafka      : bet.failed
- Failure at step 4 -> Wallet Svc -> Kafka    : wallet.debit_failed (DLT + alert)
+ Failure at step 1 (timeout/5xx) -> Bet Svc -> Wallet Svc : release(betId), best effort
+ Failure at step 2 -> Bet Svc  -> Wallet Svc : release(betId)
+                   -> Bet Svc  -> Kafka      : bet.failed (new tx, best effort; Wallet releases again, idempotent)
+ Failure at step 4 -> retries, then bet.placed.DLT (alert in M8)
 ```
 
 Because step 4 only ever *confirms* an already-reserved amount, it cannot fail for
 insufficient-funds reasons — only infrastructure reasons, which the DLT covers.
+
+Known gap: if the release call and bet-db both fail at step 2, the stake stays reserved.
+A reservation sweeper fixes this; it is deferred until it matters.
 
 ### 11.4 Cluster-safe scheduling with db-scheduler
 

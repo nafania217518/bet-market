@@ -17,6 +17,13 @@ object EventTypes {
     const val MARKET_ENDED = "market.ended"
     const val MARKET_RESOLVED = "market.resolved"
     const val MARKET_CANCELLED = "market.cancelled"
+    const val BET_PLACED = "bet.placed"
+    const val BET_CANCELLED = "bet.cancelled"
+    const val BET_FAILED = "bet.failed"
+    const val WALLET_RESERVED = "wallet.reserved"
+    const val WALLET_DEBITED = "wallet.debited"
+    const val WALLET_RELEASED = "wallet.released"
+    const val WALLET_CREDITED = "wallet.credited"
 }
 
 data class UserRegisteredV1(val userId: UUID, val email: String, val displayName: String)
@@ -36,6 +43,23 @@ data class MarketV1(
     val maxBet: Long,
     val version: Long,
 )
+
+// Payload of bet.placed, bet.cancelled and bet.failed. The wallet reservation id equals betId.
+// side: TRUE|FALSE. status: ACCEPTED|CANCELLED|FAILED. reason: set on bet.failed only.
+data class BetV1(
+    val betId: UUID,
+    val marketId: UUID,
+    val userId: UUID,
+    val side: String,
+    val amount: Long,
+    val status: String,
+    val placedAt: Instant,
+    val reason: String? = null,
+)
+
+// Payload of wallet.reserved, wallet.debited, wallet.released and wallet.credited:
+// the moved amount and the wallet state after the move.
+data class WalletMovementV1(val userId: UUID, val betId: UUID?, val amount: Long, val balance: Long, val reserved: Long)
 
 data class EventEnvelope(
     val eventId: UUID,

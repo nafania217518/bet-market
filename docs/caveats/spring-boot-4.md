@@ -41,3 +41,19 @@ Sources:
 3. Maven Central `spring-cloud-dependencies` metadata (latest GA 2025.1.3, 2026.0.0-M1):
    https://repo1.maven.org/maven2/org/springframework/cloud/spring-cloud-dependencies/maven-metadata.xml
 4. `spring-cloud-dependencies` 2025.1.3 POM (`spring-cloud-gateway.version` 5.0.3)
+
+## RestClient.Builder needs its own starter (Boot 4.1)
+Checked 2026-10-08.
+- `RestClient.Builder` auto-configuration lives in the module `spring-boot-restclient`
+  (package `org.springframework.boot.restclient.autoconfigure`).
+- From Boot 4.1, `spring-boot-starter-webmvc` alone does not give a `RestClient.Builder` bean.
+  Add `spring-boot-starter-restclient`. `shared/common` exposes it as an `api` dependency.
+- Test starters (for example `spring-boot-starter-webmvc-test`) can supply a builder in tests only.
+  Tests then pass, but the app fails at startup. The Docker smoke run catches this.
+- `RestClientCustomizer` moved to `org.springframework.boot.restclient`.
+
+Sources:
+- https://docs.spring.io/spring-boot/api/java/org/springframework/boot/restclient/autoconfigure/RestClientAutoConfiguration.html
+- https://github.com/spring-projects/spring-boot/issues/50768 (no builder after 4.0.6 -> 4.1.0 with the web starter; closed as invalid)
+- https://github.com/spring-projects/spring-boot/issues/48253 (add spring-boot-starter-restclient; test starters hide the gap)
+- https://www.rickenbazolo.com/en/blog/spring-boot-4-restclient (module relocation)

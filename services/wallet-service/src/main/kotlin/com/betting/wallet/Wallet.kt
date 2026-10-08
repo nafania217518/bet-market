@@ -8,11 +8,14 @@ import com.betting.events.EventTypes
 import com.betting.events.UserRegisteredV1
 import com.betting.events.WalletCreatedV1
 import jakarta.persistence.Entity
+import jakarta.persistence.LockModeType
 import jakarta.persistence.Id
 import jakarta.persistence.Table
 import jakarta.persistence.Version
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.Lock
+import org.springframework.data.jpa.repository.Query
 import org.springframework.http.HttpStatus
 import org.springframework.kafka.annotation.KafkaListener
 import org.springframework.stereotype.Component
@@ -45,7 +48,11 @@ class LedgerEntry(
     val createdAt: Instant = Instant.now(),
 )
 
-interface WalletRepository : JpaRepository<Wallet, UUID>
+interface WalletRepository : JpaRepository<Wallet, UUID> {
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("select w from Wallet w where w.userId = :userId")
+    fun lockById(userId: UUID): Wallet?
+}
 interface LedgerEntryRepository : JpaRepository<LedgerEntry, UUID>
 
 @Component

@@ -61,4 +61,19 @@ class EventJsonTest {
             assertEquals(market, EventJson.payload(EventJson.read(EventJson.write(e)), MarketV1::class))
         }
     }
+
+    @Test
+    fun `bet events share the BetV1 payload and wallet movements share the WalletMovementV1 payload`() {
+        assertEquals(listOf("bet.placed", "bet.cancelled", "bet.failed"), listOf(EventTypes.BET_PLACED, EventTypes.BET_CANCELLED, EventTypes.BET_FAILED))
+        assertEquals(
+            listOf("wallet.reserved", "wallet.debited", "wallet.released", "wallet.credited"),
+            listOf(EventTypes.WALLET_RESERVED, EventTypes.WALLET_DEBITED, EventTypes.WALLET_RELEASED, EventTypes.WALLET_CREDITED),
+        )
+        val bet = BetV1(UUID.randomUUID(), UUID.randomUUID(), userId, "TRUE", 50, "FAILED", Instant.parse("2026-01-01T00:00:00Z"), "persist failed")
+        assertEquals(bet, EventJson.payload(EventJson.read(EventJson.write(envelope.copy(payload = EventJson.toNode(bet)))), BetV1::class))
+        val noReason = EventJson.mapper.readTree(EventJson.write(envelope.copy(payload = EventJson.toNode(bet.copy(reason = null)))))
+        assertEquals(null, EventJson.payload(EventJson.read(noReason.toString()), BetV1::class).reason)
+        val move = WalletMovementV1(userId, bet.betId, 50, 1000, 50)
+        assertEquals(move, EventJson.payload(EventJson.read(EventJson.write(envelope.copy(payload = EventJson.toNode(move)))), WalletMovementV1::class))
+    }
 }

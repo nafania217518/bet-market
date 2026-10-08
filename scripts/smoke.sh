@@ -4,6 +4,7 @@
 # M1: register -> login -> wallet shows the starting balance.
 # M2: gateway auth (JWT), identity headers, correlation id, seeded admin.
 # M3: admin creates a market; db-scheduler freezes it at freezeAt; market.frozen reaches Kafka.
+# M4: bet saga: reserve -> bet.placed -> debit; idempotent replay; cancel refunds; no bets after freeze.
 # The Kafka check uses `docker compose exec`: Kafka has no route through the gateway.
 set -euo pipefail
 
@@ -86,7 +87,44 @@ MARKET_ID=$(curl -fs -X POST "$API/api/markets" -H "Authorization: Bearer $ADMIN
   -d "$MARKET" | json_field marketId)
 [ -n "$MARKET_ID" ] || fail "admin could not create a market"
 
-echo "9. market.frozen for $MARKET_ID reaches Kafka (freezeAt = now + ${FREEZE_IN}s)"
+wallet_is() { # wait until GET /wallets/me shows balance $1 and reserved $2
+  local w=""
+  for _ in $(seq 1 30); do
+    w=$(curl -fs "$API/api/wallets/me" -H "Authorization: Bearer $TOKEN")
+    [ "$(json_field balance <<< "$w")" = "$1" ] && [ "$(json_field reserved <<< "$w")" = "$2" ] && return 0
+    sleep 1
+  done
+  fail "wallet is $w, expected balance $1 and reserved $2"
+}
+bet() { # bet <idempotency-key> <amount> -> prints the response body; retries while the market snapshot is missing
+  local body code
+  for _ in $(seq 1 20); do
+    body=$(curl -s -w '\n%{http_code}' -X POST "$API/api/bets" -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: $1" \
+      -H 'Content-Type: application/json' -d "{\"marketId\":\"$MARKET_ID\",\"side\":\"TRUE\",\"amount\":$2}")
+    code=$(tail -n1 <<< "$body")
+    [ "$code" = 202 ] && { sed '$d' <<< "$body"; return 0; }
+    [ "$code" = 404 ] || fail "bet returned $code: $(sed '$d' <<< "$body")"
+    sleep 1
+  done
+  fail "market $MARKET_ID never reached the bet service"
+}
+
+echo "9. place a bet of 100: the wallet debits it after bet.placed"
+KEY="smoke-$RANDOM-$RANDOM"
+BET_ID=$(bet "$KEY" 100 | json_field betId)
+[ -n "$BET_ID" ] || fail "bet returned no betId"
+wallet_is $((STARTING_TOKENS - 100)) 0
+
+echo "10. replaying the Idempotency-Key returns the same bet and does not charge again"
+[ "$(bet "$KEY" 100 | json_field betId)" = "$BET_ID" ] || fail "replay returned another bet"
+wallet_is $((STARTING_TOKENS - 100)) 0
+
+echo "11. cancel a second bet: its stake comes back"
+BET2=$(bet "smoke-$RANDOM-$RANDOM" 50 | json_field betId)
+curl -fs -X DELETE "$API/api/bets/$BET2" -H "Authorization: Bearer $TOKEN" | grep -q CANCELLED || fail "cancel failed"
+wallet_is $((STARTING_TOKENS - 100)) 0
+
+echo "12. market.frozen for $MARKET_ID reaches Kafka (freezeAt = now + ${FREEZE_IN}s)"
 FROZEN=""
 for _ in $(seq 1 $(( FREEZE_IN / 5 + 12 ))); do
   if "${COMPOSE[@]}" exec -T kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server kafka:29092 \
@@ -96,4 +134,9 @@ for _ in $(seq 1 $(( FREEZE_IN / 5 + 12 ))); do
 done
 [ -n "$FROZEN" ] || fail "market.frozen for $MARKET_ID not found in Kafka"
 
-echo "OK: user $USER_ID has $BALANCE tokens; gateway auth works; market $MARKET_ID froze on schedule"
+echo "13. no bets after freeze"
+[ "$(status -X POST "$API/api/bets" -H "Authorization: Bearer $TOKEN" -H "Idempotency-Key: late-$RANDOM" \
+  -H 'Content-Type: application/json' -d "{\"marketId\":\"$MARKET_ID\",\"side\":\"TRUE\",\"amount\":10}")" = 409 ] \
+  || fail "a bet after freeze was not rejected with 409"
+
+echo "OK: user $USER_ID has $BALANCE tokens; gateway auth works; market $MARKET_ID took bets and froze on schedule"

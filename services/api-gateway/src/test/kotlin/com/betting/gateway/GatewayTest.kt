@@ -92,6 +92,29 @@ class GatewayTest : GatewayTestBase() {
     }
 
     @Test
+    fun `POST api bets and DELETE api bets id are routed to the bet service with identity headers and the Idempotency-Key header`() {
+        val id = UUID.randomUUID().toString()
+        val user = token(id, listOf("USER"))
+        listOf(HttpMethod.POST to "/api/bets", HttpMethod.DELETE to "/api/bets/7").forEach { (method, path) ->
+            client.method(method).uri(path).headers { it.setBearerAuth(user); it.set("Idempotency-Key", "k-1") }.exchange()
+                .expectStatus().isOk
+                .expectBody()
+                .jsonPath("$.path").isEqualTo(path)
+                .jsonPath("$.method").isEqualTo(method.name())
+                .jsonPath("$.userId").isEqualTo(id)
+                .jsonPath("$.roles").isEqualTo("USER")
+                .jsonPath("$.idempotencyKey").isEqualTo("k-1")
+        }
+        client.get().uri("/api/bets").headers { it.setBearerAuth(user) }.exchange().expectStatus().isNotFound
+    }
+
+    @Test
+    fun `api bets without a token returns 401`() {
+        client.post().uri("/api/bets").exchange().expectStatus().isUnauthorized
+        client.delete().uri("/api/bets/7").exchange().expectStatus().isUnauthorized
+    }
+
+    @Test
     fun `GET api markets is not routed yet and returns 404`() {
         client.get().uri("/api/markets").exchange().expectStatus().isNotFound
     }

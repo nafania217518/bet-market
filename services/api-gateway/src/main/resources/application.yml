@@ -30,16 +30,55 @@ spring:
               predicates:
                 - Path=/api/auth/**
                 - Method=POST
+              filters:
+                - name: CircuitBreaker
+                  args:
+                    name: user-auth
             - id: wallet
               uri: ${WALLET_SERVICE_URL:http://localhost:8082}
               predicates:
                 - Path=/api/wallets/me,/api/wallets/me/ledger
                 - Method=GET
+              filters:
+                - name: CircuitBreaker
+                  args:
+                    name: wallet
+                - name: Retry
+                  args:
+                    retries: 2
+                    methods: GET
+                    statuses: BAD_GATEWAY,SERVICE_UNAVAILABLE
+                    exceptions: java.io.IOException
             - id: market-write
               uri: ${MARKET_SERVICE_URL:http://localhost:8083}
               predicates:
                 - Path=/api/markets,/api/markets/**
                 - Method=POST,PATCH,DELETE
+              filters:
+                - name: CircuitBreaker
+                  args:
+                    name: market-write
+            - id: bet
+              uri: ${BET_SERVICE_URL:http://localhost:8084}
+              predicates:
+                - Path=/api/bets,/api/bets/*
+                - Method=POST,DELETE
+              filters:
+                - name: CircuitBreaker
+                  args:
+                    name: bet
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+  timelimiter:
+    configs:
+      default:
+        timeout-duration: ${DOWNSTREAM_TIMEOUT:5s}
 management:
   endpoints:
     web:
