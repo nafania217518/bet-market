@@ -613,8 +613,9 @@ GET    /actuator/prometheus                           -> 200
 **API**
 
 ```text
-POST   /api/markets            (ADMIN) { title, description, freezeAt, endAt, minBet, maxBet }
+POST   /api/markets            (any user) { title, description, freezeAt, endAt, minBet, maxBet }
                                                                  -> 201 { marketId }
+                                                                 -> 409 MARKET_LIMIT_REACHED
 PATCH  /api/markets/{id}       (ADMIN) { title?, description?, freezeAt?, endAt? }
                                                                  -> 200   (OPEN only)
 POST   /api/markets/{id}/freeze (ADMIN)                          -> 200
@@ -624,6 +625,13 @@ DELETE /api/markets/{id}        (ADMIN)                          -> 204   (cance
 GET    /actuator/prometheus                                      -> 200
 GET    /actuator/health                                          -> 200 (includes the `dbScheduler` component)
 ```
+
+- Any logged-in user may create markets. A non-admin may have at most 3 **active** markets
+  (OPEN, FROZEN or ENDED) as creator; a RESOLVED or CANCELLED market frees the slot. Admins have no limit.
+- A per-user Postgres advisory lock (`pg_advisory_xact_lock`) around count + insert stops two
+  parallel creates from passing the limit together.
+- Only admins freeze, resolve, update or cancel, including markets that users created. A creator
+  must not pick the winner of a market they may have bet on.
 
 ---
 

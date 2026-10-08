@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, expect, test } from 'vitest'
 import { useAuth } from '../auth'
@@ -27,6 +27,13 @@ test('my bets filters by status', async () => {
   const f = mockFetch(['GET', /^\/api\/me\/bets/, 200, { items: [], page: 0, size: 50, total: 0 }])
   renderWithQuery(<MyBets />)
   await waitFor(() => expect(f.mock.calls[0][0]).not.toContain('status='))
-  await userEvent.selectOptions(screen.getByLabelText('Status'), 'LOST')
+  await userEvent.click(within(screen.getByRole('group', { name: 'Status' })).getByRole('button', { name: 'LOST' }))
   await waitFor(() => expect(f.mock.calls.at(-1)![0]).toContain('status=LOST'))
+})
+
+test('my bets shows a friendly message when there are no bets', async () => {
+  loginAs()
+  mockFetch(['GET', /^\/api\/me\/bets/, 200, { items: [], page: 0, size: 50, total: 0 }])
+  renderWithQuery(<MyBets />)
+  expect(await screen.findByText(/No bets yet/)).toBeInTheDocument()
 })

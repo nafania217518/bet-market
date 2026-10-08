@@ -246,6 +246,15 @@ Decisions and deferrals:
 - No observability stack in Kubernetes. Secrets are dev values in the manifest.
 - user-service stays at 1 replica until its JWT key comes from a Secret.
 
+## Extra (2026-10-09): user-created markets and a new look
+- Any logged-in user may create markets, with at most 3 active (OPEN, FROZEN or ENDED) at a time.
+  A 4th gets 409 `MARKET_LIMIT_REACHED`. Admins have no limit. A per-user advisory lock stops
+  parallel creates from passing the limit. Only admins freeze, resolve, update or cancel.
+- SPA restyle that follows the system light/dark setting. It has market cards with a TRUE/FALSE
+  pool bar, TRUE/FALSE toggle buttons with quick amounts, a leaderboard podium and glass panels.
+  The "New market" page (`#/markets/new`) is open to every logged-in user.
+- Smoke step 8 now checks: a user creates 3 markets, the 4th is rejected, and a user cannot freeze.
+
 ## M10 — Stretch
 Tracing (OTLP + Tempo), Schema Registry + compatibility checks, Debezium outbox, load test (k6) with
 the freeze-time race, chaos (kill wallet mid-saga), wallet-integrity reconciliation job.

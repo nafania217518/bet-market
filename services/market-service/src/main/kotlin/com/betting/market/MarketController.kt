@@ -22,7 +22,7 @@ class MarketController(private val service: MarketService) {
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
     fun create(@RequestHeader("X-User-Id") userId: String, @RequestHeader("X-User-Roles") roles: String, @RequestBody req: CreateMarketRequest): MarketV1 =
-        service.create(req, admin(userId, roles))
+        service.create(req, uuid(userId), isAdmin(roles))
 
     @PatchMapping("/{id}")
     fun update(@RequestHeader("X-User-Id") userId: String, @RequestHeader("X-User-Roles") roles: String, @PathVariable id: UUID, @RequestBody req: UpdateMarketRequest): MarketV1 {
@@ -49,9 +49,13 @@ class MarketController(private val service: MarketService) {
         service.cancel(id)
     }
 
+    private fun uuid(raw: String): UUID = runCatching { UUID.fromString(raw) }.getOrElse { invalid("X-User-Id must be a UUID") }
+
+    private fun isAdmin(roles: String) = "ADMIN" in roles.split(',').map { it.trim() }
+
     private fun admin(rawUserId: String, roles: String): UUID {
-        val userId = runCatching { UUID.fromString(rawUserId) }.getOrElse { invalid("X-User-Id must be a UUID") }
-        if ("ADMIN" !in roles.split(',').map { it.trim() }) throw ApiException(HttpStatus.FORBIDDEN, "FORBIDDEN", "ADMIN role required")
+        val userId = uuid(rawUserId)
+        if (!isAdmin(roles)) throw ApiException(HttpStatus.FORBIDDEN, "FORBIDDEN", "ADMIN role required")
         return userId
     }
 }

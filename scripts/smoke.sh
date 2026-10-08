@@ -97,10 +97,23 @@ ADMIN_TOKEN=$(curl -fs -X POST "$API/api/auth/login" -H 'Content-Type: applicati
 [ -n "$ADMIN_TOKEN" ] || fail "admin login failed"
 jwt_payload "$ADMIN_TOKEN" | grep -q '"ADMIN"' || fail "admin token has no ADMIN role"
 
-echo "8. only an admin can create a market"
+echo "8. a user may have 3 active markets, a 4th is rejected; only an admin freezes, resolves or cancels"
+USER_MARKET="{\"title\":\"User market\",\"description\":\"\",\"freezeAt\":\"$(iso_in 3600)\",\"endAt\":\"$(iso_in 3700)\",\"minBet\":1,\"maxBet\":100}"
+USER_MARKETS=()
+for i in 1 2 3; do
+  id=$(curl -fs -X POST "$API/api/markets" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+    -d "$USER_MARKET" | json_field marketId)
+  [ -n "$id" ] || fail "a user could not create market $i of 3"
+  USER_MARKETS+=("$id")
+done
+[ "$(status -X POST "$API/api/markets" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d "$USER_MARKET")" = 409 ] \
+  || fail "a 4th active market was not rejected with 409"
+[ "$(status -X POST "$API/api/markets/${USER_MARKETS[0]}/freeze" -H "Authorization: Bearer $TOKEN")" = 403 ] \
+  || fail "a USER token must not freeze a market"
+for id in "${USER_MARKETS[@]}"; do # cancel them so they do not clutter the list
+  [ "$(status -X DELETE "$API/api/markets/$id" -H "Authorization: Bearer $ADMIN_TOKEN")" = 204 ] || fail "admin could not cancel $id"
+done
 MARKET="{\"title\":\"Smoke market\",\"description\":\"\",\"freezeAt\":\"$(iso_in "$FREEZE_IN")\",\"endAt\":\"$(iso_in $((FREEZE_IN + 5)))\",\"minBet\":1,\"maxBet\":500}"
-[ "$(status -X POST "$API/api/markets" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d "$MARKET")" = 403 ] \
-  || fail "a USER token must not create a market"
 MARKET_ID=$(curl -fs -X POST "$API/api/markets" -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
   -d "$MARKET" | json_field marketId)
 [ -n "$MARKET_ID" ] || fail "admin could not create a market"

@@ -39,6 +39,7 @@ class SecurityConfig {
                     // The browser cannot send Authorization on the WebSocket upgrade; Notification Service checks the JWT in the STOMP CONNECT frame.
                     .pathMatchers("/ws", "/ws/**").permitAll()
                     .pathMatchers(HttpMethod.GET, "/api/markets/**", "/api/leaderboard", "/api/stats/**").permitAll()
+                    .pathMatchers(HttpMethod.POST, "/api/markets").authenticated() // Any user may create; Market Service enforces the per-user limit.
                     .pathMatchers(HttpMethod.POST, "/api/markets/**").hasRole("ADMIN")
                     .pathMatchers(HttpMethod.PATCH, "/api/markets/**").hasRole("ADMIN")
                     .pathMatchers(HttpMethod.DELETE, "/api/markets/**").hasRole("ADMIN")

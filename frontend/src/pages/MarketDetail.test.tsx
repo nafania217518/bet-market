@@ -36,9 +36,11 @@ test('market detail shows info, pools and odds', async () => {
   renderWithQuery(<MarketDetail id="m1" />)
   expect(await screen.findByRole('heading', { name: 'Will it rain?' })).toBeInTheDocument()
   expect(screen.getByText('Rain in Kyiv')).toBeInTheDocument()
-  expect(screen.getByText(/TRUE pool: 60/)).toBeInTheDocument()
-  expect(screen.getByText(/FALSE pool: 40/)).toBeInTheDocument()
-  expect(screen.getByText(/Odds: 1.60 \/ 2.40/)).toBeInTheDocument()
+  expect(screen.getByRole('img', { name: 'TRUE 60%, FALSE 40%' })).toBeInTheDocument()
+  expect(screen.getByText('TRUE pool: 60')).toBeInTheDocument()
+  expect(screen.getByText('FALSE pool: 40')).toBeInTheDocument()
+  expect(screen.getByText('TRUE 1.60')).toBeInTheDocument()
+  expect(screen.getByText('FALSE 2.40')).toBeInTheDocument()
 })
 
 test('market detail hides the bet form from anonymous users', async () => {
@@ -65,12 +67,36 @@ test('bet form amount uses min and max from the market', async () => {
   expect(amount).toHaveAttribute('max', '100')
 })
 
+test('the side toggle marks the chosen side as pressed', async () => {
+  loginAs()
+  mockFetch(...base())
+  renderWithQuery(<MarketDetail id="m1" />)
+  const side = await screen.findByRole('group', { name: 'Side' })
+  expect(within(side).getByRole('button', { name: 'TRUE' })).toHaveAttribute('aria-pressed', 'true')
+  await userEvent.click(within(side).getByRole('button', { name: 'FALSE' }))
+  expect(within(side).getByRole('button', { name: 'FALSE' })).toHaveAttribute('aria-pressed', 'true')
+  expect(within(side).getByRole('button', { name: 'TRUE' })).toHaveAttribute('aria-pressed', 'false')
+})
+
+test('quick amount chips set the amount within min and max', async () => {
+  loginAs()
+  mockFetch(...base({ ...market, minBet: 5, maxBet: 30 }))
+  renderWithQuery(<MarketDetail id="m1" />)
+  const amount = await screen.findByLabelText('Amount')
+  const chips = screen.getByRole('group', { name: 'Quick amounts' })
+  const pick = async (name: string) => userEvent.click(within(chips).getByRole('button', { name }))
+  await pick('10'); expect(amount).toHaveValue(10)
+  await pick('50'); expect(amount).toHaveValue(30)
+  await pick('Max'); expect(amount).toHaveValue(30)
+  await pick('Min'); expect(amount).toHaveValue(5)
+})
+
 test('placing a bet adds a PENDING bet and lowers available at once, then uses the server betId', async () => {
   loginAs()
   const { fn, release } = deferredFetch('POST', '/api/bets', 202, { betId: 'b9', status: 'ACCEPTED' })
   const { qc } = renderWithQuery(<MarketDetail id="m1" />)
   await waitFor(() => expect(qc.getQueryData(['wallet'])).toEqual(wallet))
-  await userEvent.selectOptions(await screen.findByLabelText('Side'), 'FALSE')
+  await userEvent.click(within(await screen.findByRole('group', { name: 'Side' })).getByRole('button', { name: 'FALSE' }))
   await userEvent.clear(screen.getByLabelText('Amount')); await userEvent.type(screen.getByLabelText('Amount'), '7')
   await userEvent.click(screen.getByRole('button', { name: 'Place bet' }))
   expect(await screen.findByText('PENDING')).toBeInTheDocument()

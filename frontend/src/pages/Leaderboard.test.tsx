@@ -1,15 +1,20 @@
-import { screen, waitFor } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { expect, test } from 'vitest'
 import { mockFetch, renderWithQuery } from '../test-utils'
 import Leaderboard from './Leaderboard'
 
-test('leaderboard shows rank, displayName and netProfit', async () => {
-  mockFetch(['GET', /^\/api\/leaderboard/, 200, { window: 'all', entries: [{ rank: 1, userId: 'u1', displayName: 'Neo', netProfit: 42 }] }])
+const e = (rank: number, displayName: string, netProfit: number) => ({ rank, userId: `u${rank}`, displayName, netProfit })
+
+test('leaderboard shows the top 3 on a podium and the rest in a table with rank, name and net profit', async () => {
+  mockFetch(['GET', /^\/api\/leaderboard/, 200, { window: 'all', entries: [e(1, 'Neo', 42), e(2, 'Ann', 30), e(3, 'Bob', 10), e(4, 'Eve', -5)] }])
   renderWithQuery(<Leaderboard />)
-  const row = (await screen.findByText('Neo')).closest('tr')!
-  expect(row).toHaveTextContent('1')
-  expect(row).toHaveTextContent('42')
+  const podium = await screen.findByRole('list', { name: 'Top 3' })
+  expect(within(podium).getByText('Neo').closest('li')).toHaveTextContent('+42')
+  expect(within(podium).getByText('Bob')).toBeInTheDocument()
+  const row = screen.getByText('Eve').closest('tr')!
+  expect(row).toHaveTextContent('4')
+  expect(row).toHaveTextContent('-5')
 })
 
 test('leaderboard switches window between all, 7d and 30d', async () => {

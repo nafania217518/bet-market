@@ -68,7 +68,6 @@ class MarketApiTest : IntegrationTest() {
     @Test
     fun `market endpoints return 403 FORBIDDEN without the ADMIN role and 400 without identity headers`() {
         val id = createId()
-        create(roles = "USER").andExpect { status { isForbidden() }; jsonPath("$.code") { value("FORBIDDEN") } }
         mvc.post("/api/markets/$id/freeze") { header("X-User-Id", admin.toString()); header("X-User-Roles", "USER") }
             .andExpect { status { isForbidden() }; jsonPath("$.code") { value("FORBIDDEN") } }
         badRequest(mvc.post("/api/markets/$id/freeze"))

@@ -57,6 +57,11 @@ interface MarketRepository : JpaRepository<Market, UUID> {
     fun lockById(id: UUID): Market?
 
     fun countByStatus(status: String): Long
+
+    fun countByCreatedByAndStatusIn(createdBy: UUID, statuses: Collection<String>): Long
+
+    @Query(value = "SELECT pg_advisory_xact_lock(hashtext(CAST(:userId AS text)))::text", nativeQuery = true)
+    fun lockCreator(userId: String): String
 }
 
 data class CreateMarketRequest(
@@ -88,6 +93,8 @@ class MarketTasks {
 /** Scheduler runs have no request: give the events they emit a fresh correlation id. */
 fun withCorrelationId(block: () -> Unit) = MDC.putCloseable(CorrelationId.MDC_KEY, UUID.randomUUID().toString()).use { block() }
 
+const val MAX_ACTIVE_MARKETS = 3
+val ACTIVE_STATUSES = listOf("OPEN", "FROZEN", "ENDED")
 val STATUSES = listOf("OPEN", "FROZEN", "ENDED", "RESOLVED", "CANCELLED")
 
 @Service
@@ -104,7 +111,12 @@ class MarketService(
         STATUSES.forEach { s -> Gauge.builder("markets.by.status", markets) { it.countByStatus(s).toDouble() }.tag("status", s).register(registry) }
     }
 
-    fun create(req: CreateMarketRequest, createdBy: UUID): MarketV1 {
+    fun create(req: CreateMarketRequest, createdBy: UUID, admin: Boolean = true): MarketV1 {
+        if (!admin) {
+            markets.lockCreator(createdBy.toString()) // Serializes creates of one user until commit.
+            if (markets.countByCreatedByAndStatusIn(createdBy, ACTIVE_STATUSES) >= MAX_ACTIVE_MARKETS)
+                throw ApiException(HttpStatus.CONFLICT, "MARKET_LIMIT_REACHED", "You can have at most $MAX_ACTIVE_MARKETS active markets")
+        }
         val m = Market(UUID.randomUUID(), req.title.trim(), req.description, "OPEN", null, req.freezeAt, req.endAt, req.minBet, req.maxBet, createdBy)
         validate(m)
         markets.save(m)

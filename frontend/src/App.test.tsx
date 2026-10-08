@@ -30,18 +30,30 @@ test('app routes each hash to its page', async () => {
   go('#/wallet'); expect(await screen.findByRole('heading', { name: 'Wallet' })).toBeInTheDocument()
   go('#/leaderboard'); expect(await screen.findByRole('heading', { name: 'Leaderboard' })).toBeInTheDocument()
   go('#/login'); expect(await screen.findByRole('heading', { name: 'Log in' })).toBeInTheDocument()
-  go('#/admin'); expect(await screen.findByText('Admins only')).toBeInTheDocument()
+  go('#/markets/new'); expect(await screen.findByRole('heading', { name: 'New market' })).toBeInTheDocument()
+  go('#/admin'); expect(await screen.findByRole('heading', { name: 'New market' })).toBeInTheDocument()
 })
 
-test('header shows the Admin link only to admins', async () => {
+test('any logged-in user sees the New market link', async () => {
   routes()
-  loginAs(['USER'])
   const { unmount } = renderWithQuery(<App />)
-  expect(screen.queryByRole('link', { name: 'Admin' })).toBeNull()
+  expect(screen.queryByRole('link', { name: 'New market' })).toBeNull()
   unmount()
-  loginAs(['USER', 'ADMIN'])
+  loginAs(['USER'])
   renderWithQuery(<App />)
-  expect(screen.getByRole('link', { name: 'Admin' })).toHaveAttribute('href', '#/admin')
+  expect(screen.getByRole('link', { name: 'New market' })).toHaveAttribute('href', '#/markets/new')
+})
+
+test('the header marks the current page as active', async () => {
+  routes()
+  loginAs()
+  renderWithQuery(<App />)
+  expect(screen.getByRole('link', { name: 'Markets' })).toHaveAttribute('aria-current', 'page')
+  go('#/wallet')
+  expect(screen.getByRole('link', { name: 'Wallet' })).toHaveAttribute('aria-current', 'page')
+  expect(screen.getByRole('link', { name: 'Markets' })).not.toHaveAttribute('aria-current')
+  go('#/markets/new')
+  expect(screen.getByRole('link', { name: 'New market' })).toHaveAttribute('aria-current', 'page')
 })
 
 test('header shows the available balance and a logout button when logged in', async () => {

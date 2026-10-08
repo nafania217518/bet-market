@@ -71,6 +71,26 @@ class GatewayTest : GatewayTestBase() {
     }
 
     @Test
+    fun `a USER token may create a market`() {
+        val user = token(UUID.randomUUID().toString(), listOf("USER"))
+        client.post().uri("/api/markets").headers { it.setBearerAuth(user) }.exchange().expectStatus().isOk
+    }
+
+    @Test
+    fun `a USER token may not freeze, resolve, update or cancel a market`() {
+        val user = token(UUID.randomUUID().toString(), listOf("USER"))
+        listOf(HttpMethod.POST to "/api/markets/42/freeze", HttpMethod.POST to "/api/markets/42/resolve",
+            HttpMethod.PATCH to "/api/markets/42", HttpMethod.DELETE to "/api/markets/42").forEach { (method, path) ->
+            client.method(method).uri(path).headers { it.setBearerAuth(user) }.exchange().expectStatus().isForbidden
+        }
+    }
+
+    @Test
+    fun `creating a market without a token is 401`() {
+        client.post().uri("/api/markets").exchange().expectStatus().isUnauthorized
+    }
+
+    @Test
     fun `admin POST api markets, PATCH and DELETE api markets id, and POST freeze and resolve are routed to the market service with identity headers`() {
         val id = UUID.randomUUID().toString()
         val admin = token(id, listOf("USER", "ADMIN"))

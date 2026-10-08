@@ -3,20 +3,42 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, expect, test } from 'vitest'
 import { useAuth } from '../auth'
 import { loginAs, market, mockFetch, renderWithQuery } from '../test-utils'
-import Admin from './Admin'
+import NewMarket from './NewMarket'
 
-beforeEach(() => { useAuth.getState().logout(); location.hash = '#/admin' })
+beforeEach(() => { useAuth.getState().logout(); location.hash = '#/markets/new' })
 
-test('admin page shows "Admins only" to non-admins', () => {
+test('anonymous users are asked to log in on the new market page', () => {
+  renderWithQuery(<NewMarket />)
+  expect(screen.getByRole('link', { name: /log in/i })).toHaveAttribute('href', '#/login')
+  expect(screen.queryByRole('button', { name: 'Create market' })).toBeNull()
+})
+
+test('the new market page shows the 3 active markets hint to non-admins', () => {
   loginAs(['USER'])
-  renderWithQuery(<Admin />)
-  expect(screen.getByText('Admins only')).toBeInTheDocument()
+  const { unmount } = renderWithQuery(<NewMarket />)
+  expect(screen.getByText('You can have up to 3 active markets')).toBeInTheDocument()
+  unmount()
+  loginAs(['USER', 'ADMIN'])
+  renderWithQuery(<NewMarket />)
+  expect(screen.queryByText('You can have up to 3 active markets')).toBeNull()
+})
+
+test('creating a fourth market shows the limit message', async () => {
+  loginAs(['USER'])
+  mockFetch(['POST', '/api/markets', 409, { code: 'MARKET_LIMIT_REACHED', message: 'You can have at most 3 active markets' }])
+  renderWithQuery(<NewMarket />)
+  await userEvent.type(screen.getByLabelText('Title'), 'T')
+  await userEvent.type(screen.getByLabelText('Freeze at'), '2026-10-10T12:00')
+  await userEvent.type(screen.getByLabelText('End at'), '2026-10-11T12:00')
+  await userEvent.click(screen.getByRole('button', { name: 'Create market' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('You can have at most 3 active markets')
+  expect(location.hash).toBe('#/markets/new')
 })
 
 test('create-market form sends ISO UTC instants and goes to the new market', async () => {
-  loginAs(['USER', 'ADMIN'])
+  loginAs(['USER'])
   const f = mockFetch(['POST', '/api/markets', 201, { ...market, marketId: 'm9' }])
-  renderWithQuery(<Admin />)
+  renderWithQuery(<NewMarket />)
   await userEvent.type(screen.getByLabelText('Title'), 'T')
   await userEvent.type(screen.getByLabelText('Description'), 'D')
   await userEvent.type(screen.getByLabelText('Freeze at'), '2026-10-10T12:00')
@@ -34,7 +56,7 @@ test('create-market form sends ISO UTC instants and goes to the new market', asy
 test('create-market form shows the API error message', async () => {
   loginAs(['USER', 'ADMIN'])
   mockFetch(['POST', '/api/markets', 422, { code: 'VALIDATION', message: 'endAt must be after freezeAt' }])
-  renderWithQuery(<Admin />)
+  renderWithQuery(<NewMarket />)
   await userEvent.type(screen.getByLabelText('Title'), 'T')
   await userEvent.type(screen.getByLabelText('Freeze at'), '2026-10-10T12:00')
   await userEvent.type(screen.getByLabelText('End at'), '2026-10-09T12:00')

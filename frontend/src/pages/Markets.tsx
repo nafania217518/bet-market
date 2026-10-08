@@ -1,11 +1,36 @@
 import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 import { api, fmtOdds } from '../api'
+import { card, Empty, h1, MarketPill, muted, PoolBar, Segmented, Skeleton, timeLabel } from '../ui'
 
 export type Market = {
   marketId: string; title: string; description: string; status: string; winningSide: string | null
   freezeAt: string; endAt: string; minBet: number; maxBet: number; truePool: number; falsePool: number
   totalPool: number; betCount: number; uniqueBettors: number; oddsTrue: number | null; oddsFalse: number | null
+}
+
+export const OddsChip = ({ side, odds }: { side: string; odds: number | null }) => (
+  <span className={`rounded-lg px-2 py-1 text-xs font-semibold ${side === 'TRUE'
+    ? 'bg-emerald-50 text-emerald-800 dark:bg-emerald-500/10 dark:text-emerald-300'
+    : 'bg-rose-50 text-rose-800 dark:bg-rose-500/10 dark:text-rose-300'}`}>{side} {fmtOdds(odds)}</span>
+)
+
+function MarketCard({ m }: { m: Market }) {
+  return (
+    <article className={`${card} flex flex-col gap-4 p-5 transition hover:-translate-y-0.5 hover:shadow-lg motion-reduce:hover:translate-y-0`}>
+      <div className="flex items-center justify-between gap-2">
+        <MarketPill status={m.status} />
+        <span className={`text-xs ${muted}`}>{timeLabel(m.status, m.freezeAt)}</span>
+      </div>
+      <a className="text-lg font-semibold leading-snug hover:text-indigo-700 hover:underline dark:hover:text-indigo-300" href={`#/markets/${m.marketId}`}>{m.title}</a>
+      <div className="mt-auto">
+        <p className={`text-xs uppercase tracking-wide ${muted}`}>Total pool</p>
+        <p className="text-3xl font-bold">{m.totalPool}</p>
+      </div>
+      <PoolBar t={m.truePool} f={m.falsePool} />
+      <div className="flex gap-2"><OddsChip side="TRUE" odds={m.oddsTrue} /><OddsChip side="FALSE" odds={m.oddsFalse} /></div>
+    </article>
+  )
 }
 
 export default function Markets() {
@@ -18,29 +43,15 @@ export default function Markets() {
   })
   return (
     <div>
-      <h2 className="text-xl font-bold mb-2">Markets</h2>
-      <div className="flex gap-4 mb-2">
-        <label>Status <select value={status} onChange={(e) => setStatus(e.target.value)} className="border rounded">
-          {['OPEN', 'FROZEN', 'ENDED', 'RESOLVED', 'CANCELLED', 'all'].map((s) => <option key={s}>{s}</option>)}
-        </select></label>
-        <label>Sort <select value={sort} onChange={(e) => setSort(e.target.value)} className="border rounded">
-          <option>endAt</option><option>pool</option>
-        </select></label>
+      <h2 className={h1}>Markets</h2>
+      <div className="mb-6 flex flex-wrap gap-3">
+        <Segmented label="Status" value={status} onChange={setStatus} options={['OPEN', 'FROZEN', 'ENDED', 'RESOLVED', 'CANCELLED', 'all']} />
+        <Segmented label="Sort" value={sort} onChange={setSort} options={['endAt', 'pool']} />
       </div>
-      <table className="w-full text-left">
-        <thead><tr><th>Title</th><th>Status</th><th>Pool</th><th>Odds T / F</th><th>Freezes</th></tr></thead>
-        <tbody>
-          {data?.items.map((m) => (
-            <tr key={m.marketId} className="border-t">
-              <td><a className="text-blue-600 underline" href={`#/markets/${m.marketId}`}>{m.title}</a></td>
-              <td>{m.status}</td>
-              <td>{m.totalPool}</td>
-              <td>{fmtOdds(m.oddsTrue)} / {fmtOdds(m.oddsFalse)}</td>
-              <td>{new Date(m.freezeAt).toLocaleString()}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      {data?.items.length === 0 && <Empty>No markets here yet</Empty>}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {data ? data.items.map((m) => <MarketCard key={m.marketId} m={m} />) : [1, 2, 3].map((i) => <Skeleton key={i} className="h-56" />)}
+      </div>
     </div>
   )
 }
