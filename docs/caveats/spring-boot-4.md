@@ -57,3 +57,19 @@ Sources:
 - https://github.com/spring-projects/spring-boot/issues/50768 (no builder after 4.0.6 -> 4.1.0 with the web starter; closed as invalid)
 - https://github.com/spring-projects/spring-boot/issues/48253 (add spring-boot-starter-restclient; test starters hide the gap)
 - https://www.rickenbazolo.com/en/blog/spring-boot-4-restclient (module relocation)
+
+## MongoDB properties moved to `spring.mongodb.*` (Boot 4)
+Checked 2026-10-08.
+- Boot 4 uses `spring.mongodb.uri` (and `spring.mongodb.database`, ...). The Boot 3 prefix
+  `spring.data.mongodb.*` is ignored without an error: the app connects to localhost defaults.
+- The auto-configuration moved to `org.springframework.boot.mongodb.autoconfigure`.
+- Actuator: `management.health.mongo.*` became `management.health.mongodb.*`.
+- Redis keeps `spring.data.redis.*`.
+- The read model stores UUIDs as strings, so the changed default UUID representation does not apply.
+
+Sources:
+- https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Migration-Guide (properties now begin with `spring.mongodb`)
+- https://docs.spring.io/spring-boot/reference/data/nosql.html (`spring.mongodb.uri`)
+- https://noregressions.dev/guides/migration/cards/mongodb-property-renames.html (old prefix silently ignored)
+- https://stackoverflow.com/questions/23515295/spring-boot-and-how-to-configure-connection-details-to-mongodb (`spring.mongodb.uri`)
+- Boot 4.1.1 jar metadata (checked by the projection and query agents)

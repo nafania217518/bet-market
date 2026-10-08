@@ -1,0 +1,16 @@
+spring:
+  application.name: projection-service
+  mongodb:
+    uri: ${MONGO_URI:mongodb://localhost:27017/read_db}
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP:localhost:9092}
+    consumer:
+      group-id: projection-service
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+server.port: 8086
+management.endpoints.web.exposure.include: health

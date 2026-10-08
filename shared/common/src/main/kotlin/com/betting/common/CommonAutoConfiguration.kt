@@ -4,6 +4,10 @@ import org.apache.kafka.common.TopicPartition
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.boot.restclient.RestClientCustomizer
 import org.springframework.boot.autoconfigure.AutoConfiguration
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
+import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication
+import org.springframework.context.annotation.Import
 import org.springframework.context.annotation.Bean
 import org.springframework.jdbc.core.simple.JdbcClient
 import org.springframework.kafka.core.KafkaTemplate
@@ -16,45 +20,67 @@ import org.springframework.transaction.support.TransactionTemplate
 import org.springframework.util.backoff.ExponentialBackOff
 import javax.sql.DataSource
 
-@AutoConfiguration
-@EnableScheduling
+// Each group loads only when its optional dependencies are present, so read-side services can reuse this module.
+@AutoConfiguration(
+    afterName = [
+        "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration",
+        "org.springframework.boot.kafka.autoconfigure.KafkaAutoConfiguration",
+    ],
+)
+// Groups are imported, not annotated with @Configuration, so component scan in com.betting.* never picks them up early.
+@Import(CommonAutoConfiguration.Outbox::class, CommonAutoConfiguration.Kafka::class, CommonAutoConfiguration.Web::class, CommonAutoConfiguration.RestClient::class)
 class CommonAutoConfiguration {
-    @Bean
-    fun outboxWriter(dataSource: DataSource, @Value("\${spring.application.name}") producer: String) =
-        OutboxWriter(JdbcClient.create(dataSource), producer)
+    @ConditionalOnClass(name = ["org.springframework.jdbc.core.simple.JdbcClient", "org.springframework.kafka.core.KafkaTemplate"])
+    @ConditionalOnBean(DataSource::class)
+    @EnableScheduling
+    class Outbox {
+        @Bean
+        fun outboxWriter(dataSource: DataSource, @Value("\${spring.application.name}") producer: String) =
+            OutboxWriter(JdbcClient.create(dataSource), producer)
 
-    @Bean
-    fun outboxPoller(dataSource: DataSource, kafka: KafkaTemplate<String, String>, txManager: PlatformTransactionManager) =
-        OutboxPoller(JdbcClient.create(dataSource), kafka, TransactionTemplate(txManager))
+        @Bean
+        fun outboxPoller(dataSource: DataSource, kafka: KafkaTemplate<String, String>, txManager: PlatformTransactionManager) =
+            OutboxPoller(JdbcClient.create(dataSource), kafka, TransactionTemplate(txManager))
 
-    @Bean
-    fun idempotentConsumer(dataSource: DataSource) = IdempotentConsumer(JdbcClient.create(dataSource))
+        @Bean
+        fun idempotentConsumer(dataSource: DataSource) = IdempotentConsumer(JdbcClient.create(dataSource))
+    }
 
-    @Bean
-    fun correlationIdFilter() = CorrelationIdFilter()
+    @ConditionalOnClass(name = ["org.springframework.kafka.core.KafkaTemplate"])
+    class Kafka {
+        @Bean
+        fun correlationIdRecordInterceptor() = CorrelationIdRecordInterceptor()
 
-    @Bean
-    fun correlationIdRecordInterceptor() = CorrelationIdRecordInterceptor()
+        // Every consumer: 3 retries with exponential backoff, then <topic>.DLT (partition -1 = Kafka picks).
+        @Bean
+        fun kafkaErrorHandler(
+            kafka: KafkaTemplate<String, String>,
+            @Value("\${kafka.retry.initial-interval-ms:1000}") initialMs: Long,
+        ): CommonErrorHandler = DefaultErrorHandler(
+            DeadLetterPublishingRecoverer(kafka) { record, _ -> TopicPartition(record.topic() + ".DLT", -1) },
+            ExponentialBackOff(initialMs, 2.0).apply { maxAttempts = 3 }, // 3 retries after the first try
+        )
+    }
 
-    @Bean
-    fun globalExceptionHandler() = GlobalExceptionHandler()
+    @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
+    @ConditionalOnClass(name = ["org.springframework.web.servlet.DispatcherServlet"])
+    class Web {
+        @Bean
+        fun correlationIdFilter() = CorrelationIdFilter()
 
-    // Every consumer: 3 retries with exponential backoff, then <topic>.DLT (partition -1 = Kafka picks).
-    @Bean
-    fun kafkaErrorHandler(
-        kafka: KafkaTemplate<String, String>,
-        @Value("\${kafka.retry.initial-interval-ms:1000}") initialMs: Long,
-    ): CommonErrorHandler = DefaultErrorHandler(
-        DeadLetterPublishingRecoverer(kafka) { record, _ -> TopicPartition(record.topic() + ".DLT", -1) },
-        ExponentialBackOff(initialMs, 2.0).apply { maxAttempts = 3 } // 3 retries after the first try,
-    )
+        @Bean
+        fun globalExceptionHandler() = GlobalExceptionHandler()
+    }
 
-    @Bean
-    fun correlationIdRestClientCustomizer() = RestClientCustomizer { builder ->
-        builder.requestInterceptor { request, body, execution ->
-            val id = CorrelationId.current()
-            if (id != null && !request.headers.containsHeader(CorrelationId.HEADER)) request.headers.set(CorrelationId.HEADER, id)
-            execution.execute(request, body)
+    @ConditionalOnClass(name = ["org.springframework.boot.restclient.RestClientCustomizer"])
+    class RestClient {
+        @Bean
+        fun correlationIdRestClientCustomizer() = RestClientCustomizer { builder ->
+            builder.requestInterceptor { request, body, execution ->
+                val id = CorrelationId.current()
+                if (id != null && !request.headers.containsHeader(CorrelationId.HEADER)) request.headers.set(CorrelationId.HEADER, id)
+                execution.execute(request, body)
+            }
         }
     }
 }

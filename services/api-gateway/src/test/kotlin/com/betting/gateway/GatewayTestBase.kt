@@ -52,7 +52,8 @@ abstract class GatewayTestBase {
         /** Calls per X-Fake-Key header value. */
         val calls = ConcurrentHashMap<String, AtomicInteger>()
 
-        private val downstream = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
+        /** Fake downstream; the "service" field of the echo tells which one answered. */
+        private fun fake(service: String) = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
             executor = Executors.newCachedThreadPool()
             createContext("/") { ex ->
                 // Test behaviour: X-Fake-Sleep (ms), X-Fake-Fail (answer 503 for the first N calls of X-Fake-Key).
@@ -63,7 +64,7 @@ abstract class GatewayTestBase {
                     JWKSet(testKey.toPublicJWK()).toString()
                 } else {
                     fun h(name: String) = ex.requestHeaders.getFirst(name)?.let { "\"$it\"" } ?: "null"
-                    """{"method":"${ex.requestMethod}","path":"${ex.requestURI.path}","userId":${h("X-User-Id")},""" +
+                    """{"service":"$service","method":"${ex.requestMethod}","path":"${ex.requestURI.path}","userId":${h("X-User-Id")},""" +
                         """"roles":${h("X-User-Roles")},"correlationId":${h("X-Correlation-Id")},""" +
                         """"idempotencyKey":${h("Idempotency-Key")}}"""
                 }
@@ -75,6 +76,9 @@ abstract class GatewayTestBase {
             start()
         }
 
+        private val downstream = fake("main")
+        private val queryDownstream = fake("query")
+
         @JvmStatic
         @DynamicPropertySource
         fun props(r: DynamicPropertyRegistry) {
@@ -83,6 +87,7 @@ abstract class GatewayTestBase {
             r.add("WALLET_SERVICE_URL") { url }
             r.add("MARKET_SERVICE_URL") { url }
             r.add("BET_SERVICE_URL") { url }
+            r.add("QUERY_SERVICE_URL") { "http://127.0.0.1:${queryDownstream.address.port}" }
             r.add("spring.data.redis.host") { redis.host }
             r.add("spring.data.redis.port") { redis.getMappedPort(6379) }
         }

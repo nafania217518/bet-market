@@ -6,6 +6,7 @@
 # M3: admin creates a market; db-scheduler freezes it at freezeAt; market.frozen reaches Kafka.
 # M4: bet saga: reserve -> bet.placed -> debit; idempotent replay; cancel refunds; no bets after freeze.
 # M5: second user bets the other side; admin resolves after endAt; settlement pays the winner.
+# M6: the read side (Query Service via the gateway) shows the market, the bets and the leaderboard.
 # The Kafka check uses `docker compose exec`: Kafka has no route through the gateway.
 set -euo pipefail
 
@@ -129,8 +130,9 @@ wallet_is $((STARTING_TOKENS - 100)) 0
 echo "11b. a second user bets 300 on FALSE"
 A_TOKEN=$TOKEN
 B_EMAIL="smoke-b-$(date +%s)-$RANDOM@example.com"
-curl -fs -X POST "$API/api/auth/register" -H 'Content-Type: application/json' \
-  -d "{\"email\":\"$B_EMAIL\",\"password\":\"$PASSWORD\",\"displayName\":\"Smoke B\"}" > /dev/null || fail "register B failed"
+B_ID=$(curl -fs -X POST "$API/api/auth/register" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$B_EMAIL\",\"password\":\"$PASSWORD\",\"displayName\":\"Smoke B\"}" | json_field userId)
+[ -n "$B_ID" ] || fail "register B failed"
 TOKEN=$(curl -fs -X POST "$API/api/auth/login" -H 'Content-Type: application/json' \
   -d "{\"email\":\"$B_EMAIL\",\"password\":\"$PASSWORD\"}" | json_field accessToken)
 [ -n "$TOKEN" ] || fail "login B failed"
@@ -172,5 +174,32 @@ PAYOUT=$(( POOL * (10000 - HOUSE_EDGE_BPS) / 10000 ))
 TOKEN=$A_TOKEN; wallet_is $((STARTING_TOKENS - 100 + PAYOUT)) 0
 TOKEN=$B_TOKEN; wallet_is $((STARTING_TOKENS - 300)) 0
 TOKEN=$A_TOKEN
+
+# eventually <description> <command...>: retry a check for up to 30 s (the read side is async).
+eventually() {
+  local what=$1; shift
+  for _ in $(seq 1 30); do "$@" > /dev/null 2>&1 && return 0; sleep 1; done
+  fail "$what"
+}
+market_view_ok() {
+  local m; m=$(curl -fs "$API/api/markets/$MARKET_ID")
+  [ "$(json_field status <<< "$m")" = RESOLVED ] && [ "$(json_field totalPool <<< "$m")" = "$POOL" ]
+}
+my_bet_is() { curl -fs "$API/api/me/bets?status=$1" -H "Authorization: Bearer $TOKEN" | grep -q "\"marketId\":\"$MARKET_ID\""; }
+net_profit_is() { # net_profit_is <userId> <amount>
+  [ "$(curl -fs "$API/api/leaderboard?window=all" | grep -o "\"userId\":\"$1\"[^}]*" | json_field netProfit)" = "$2" ]
+}
+
+echo "16. the public market view shows RESOLVED and the pool without a token"
+eventually "market view never showed RESOLVED with pool $POOL" market_view_ok
+
+echo "17. my bets: A won, B lost"
+TOKEN=$A_TOKEN; eventually "A's bet is not WON" my_bet_is WON
+TOKEN=$B_TOKEN; eventually "B's bet is not LOST" my_bet_is LOST
+TOKEN=$A_TOKEN
+
+echo "18. leaderboard: A +$((PAYOUT - 100)), B -300"
+eventually "A's net profit is not $((PAYOUT - 100))" net_profit_is "$USER_ID" $((PAYOUT - 100))
+eventually "B's net profit is not -300" net_profit_is "$B_ID" -300
 
 echo "OK: user $USER_ID has $BALANCE tokens; gateway auth works; market $MARKET_ID took bets, froze on schedule and paid $PAYOUT to the winner"

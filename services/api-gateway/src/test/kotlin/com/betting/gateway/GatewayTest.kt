@@ -115,8 +115,33 @@ class GatewayTest : GatewayTestBase() {
     }
 
     @Test
-    fun `GET api markets is not routed yet and returns 404`() {
-        client.get().uri("/api/markets").exchange().expectStatus().isNotFound
+    fun `public GET api markets, a market detail, and the leaderboard are routed to the query service without a token`() {
+        for (path in listOf("/api/markets", "/api/markets/m-1", "/api/leaderboard")) {
+            client.get().uri(path).header("X-User-Id", "evil").header("X-User-Roles", "ADMIN").exchange()
+                .expectStatus().isOk
+                .expectBody().jsonPath("$.service").isEqualTo("query").jsonPath("$.path").isEqualTo(path)
+                .jsonPath("$.userId").doesNotExist().jsonPath("$.roles").doesNotExist()
+        }
+    }
+
+    @Test
+    fun `GET api me bets and GET api users id stats need a token and reach the query service with X-User-Id`() {
+        val id = UUID.randomUUID().toString()
+        for (path in listOf("/api/me/bets", "/api/users/$id/stats")) {
+            client.get().uri(path).exchange().expectStatus().isUnauthorized
+            client.get().uri(path).headers { it.setBearerAuth(token(id, listOf("USER"))) }.exchange()
+                .expectStatus().isOk
+                .expectBody().jsonPath("$.service").isEqualTo("query").jsonPath("$.path").isEqualTo(path)
+                .jsonPath("$.userId").isEqualTo(id)
+        }
+    }
+
+    @Test
+    fun `POST api markets still goes to the market service while GET api markets goes to the query service`() {
+        client.post().uri("/api/markets").headers { it.setBearerAuth(token("admin", listOf("ADMIN"))) }.exchange()
+            .expectStatus().isOk.expectBody().jsonPath("$.service").isEqualTo("main")
+        client.get().uri("/api/markets").exchange()
+            .expectStatus().isOk.expectBody().jsonPath("$.service").isEqualTo("query")
     }
 
     @Test

@@ -387,25 +387,28 @@ LedgerEntry (append-only)
 ### Read models (MongoDB)
 
 ```text
-market_view
+market_view                       (one doc per market; ids are UUID strings)
   _id           marketId
-  title, description, status
-  freezeAt, endAt
-  truePool, falsePool, totalPool
-  betCount, uniqueBettors
-  oddsTrue, oddsFalse
+  title, description, status, winningSide, freezeAt, endAt, minBet, maxBet, version
+  truePool, falsePool, totalPool, betCount, uniqueBettors   (recomputed from bet_view)
+  settlement    { outcome, winningSide, truePool, falsePool }  (from settlement.completed)
   updatedAt
 
-user_bet_view
+bet_view                          (one doc per bet; index {userId, placedAt desc}, {marketId})
+  _id           betId
+  marketId, userId, side, amount, placedAt
+  status        ACCEPTED | CANCELLED | WON | LOST | REFUNDED
+  updatedAt
+
+user_view
   _id           userId
-  bets          [ { betId, marketId, marketTitle, side, amount, status, placedAt, payout } ]
-  updatedAt
-
-leaderboard_snapshot
-  _id           window ("7d" | "30d" | "all")
-  entries       [ { userId, displayName, netProfit, roi } ]
-  updatedAt
+  displayName
 ```
+
+Odds are not stored: Query Service computes them from the pools and the house edge.
+The leaderboard lives in Redis only (`leaderboard:day:*`, `leaderboard:all`), not in MongoDB.
+`bet_view` is one document per bet instead of an embedded array per user: upserts stay simple
+and idempotent, and `/api/me/bets` pages with an index.
 
 ### Payout formula (pari-mutuel with house edge)
 
@@ -740,8 +743,19 @@ No public API — this service is purely event-driven.
 **Responsibilities**
 
 - The only writer of the read model. Nothing else may write to `read-db` or `read-cache`.
-- Maintains a per-consumer offset collection so replays are safe and idempotent.
-- For each event type:
+- Every handler is idempotent and independent of the order across topics, so a duplicate, a
+  reordering, or a full replay gives the same read model (tests apply events twice and shuffled):
+  - `market.*` → upsert `market_view` only if the stored `version` is lower.
+  - `bet.*` → upsert `bet_view` (a `bet.cancelled` that came first wins), then recompute the
+    market's pools from `bet_view` (no increments).
+  - `settlement.completed` → store the result on `market_view`; bet statuses (WON/LOST/REFUNDED)
+    are derived from it after every event of that market.
+  - `wallet.debited`/`wallet.credited` → one Lua script: `SET projection:processed:{eventId} NX`
+    then `ZINCRBY` on `leaderboard:day:{date}` (date of `occurredAt`) and `leaderboard:all`.
+- Rebuild: `scripts/rebuild-read-model.sh` stops the projection, drops `read_db` and its Redis
+  keys, resets the consumer group to the earliest offsets, replays, and diffs the result.
+  Replayed topics keep their events forever (§9).
+- Original plan per event type (still the intent; details above):
   - `market.created` / `market.updated` / `market.frozen` / `market.ended` / `market.resolved` /
     `market.cancelled` → upsert `market_view`.
   - `bet.placed` / `bet.cancelled` → increment `market_view` pools and `betCount`, upsert
@@ -756,9 +770,11 @@ No public API — this service is purely event-driven.
 **API**
 
 ```text
-GET    /internal/projections/status   -> 200 { lastProcessedOffsets, lag }
-GET    /actuator/prometheus           -> 200
+GET    /actuator/health               -> 200
 ```
+
+Lag comes from `kafka-consumer-groups.sh --describe` (the rebuild script uses it);
+`/internal/projections/status` is deferred.
 
 ---
 
@@ -854,6 +870,13 @@ GET  /actuator/health                     -> 200
 | `settlement.started` | `marketId` | 3 | 30d | settlement-service | projection |
 | `payout.calculated` | `marketId` | 6 | 90d | settlement-service | wallet-service, projection, notification |
 | `settlement.completed` | `marketId` | 3 | 90d | settlement-service | projection, notification |
+
+**Retention for replay:** the Projection Service rebuilds the read model by replaying every topic
+it consumes (`user.registered`, `market.*`, `bet.placed`, `bet.cancelled`, `wallet.debited`,
+`wallet.credited`, `settlement.completed`). Those topics use `retention.ms=-1` (keep forever) in
+`infra/kafka/create-topics.sh`; the retention column above is overridden for them. With finite
+retention a replay after that period silently loses data. Compacted snapshot topics are the
+alternative if storage grows.
 
 **Dead-letter:** every consumer has a `.DLT` counterpart (e.g. `bet.placed.DLT`) after 3 retries
 with exponential backoff.

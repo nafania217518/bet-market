@@ -1,0 +1,7 @@
+spring:
+  application.name: query-service
+  mongodb.uri: ${MONGO_URI:mongodb://localhost:27017/read_db}
+  data.redis.host: ${REDIS_HOST:localhost}
+server.port: 8087
+query.house-edge-bps: ${HOUSE_EDGE_BPS:500}
+management.endpoints.web.exposure.include: health

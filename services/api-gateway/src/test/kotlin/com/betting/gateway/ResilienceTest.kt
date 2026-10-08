@@ -46,6 +46,14 @@ class ResilienceTest : GatewayTestBase() {
     }
 
     @Test
+    fun `a GET to the query route is retried after a 503 and succeeds`() {
+        val k = key()
+        client.get().uri("/api/markets").headers { it.set("X-Fake-Key", k); it.set("X-Fake-Fail", "1") }
+            .exchange().expectStatus().isOk
+        assertEquals(2, calls[k]!!.get())
+    }
+
+    @Test
     fun `a POST is never retried`() {
         val k = key()
         client.post().uri("/api/auth/login").headers { it.set("X-Fake-Key", k); it.set("X-Fake-Fail", "1") }

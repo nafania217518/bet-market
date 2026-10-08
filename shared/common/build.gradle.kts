@@ -4,10 +4,9 @@ apply(plugin = "org.jetbrains.kotlin.plugin.jpa")
 
 dependencies {
     "api"(project(":shared:events"))
-    "implementation"("org.springframework.boot:spring-boot-starter-webmvc")
-    "implementation"("org.springframework.boot:spring-boot-starter-data-jpa")
-    "implementation"("org.springframework.boot:spring-boot-starter-kafka")
-    "api"("org.springframework.boot:spring-boot-starter-restclient")
+    // Optional: consumers bring the starters they use; CommonAutoConfiguration turns on the matching beans.
+    val optional = listOf("webmvc", "data-jpa", "kafka", "restclient").map { "org.springframework.boot:spring-boot-starter-$it" }
+    optional.forEach { "compileOnly"(it); "testImplementation"(it) }
     "implementation"("tools.jackson.module:jackson-module-kotlin")
 
     "testImplementation"("org.springframework.boot:spring-boot-starter-webmvc-test")

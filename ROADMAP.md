@@ -151,12 +151,28 @@ Decisions and deferrals:
 - Deferred: `settlement.started` and `GET /internal/settlements/{id}` (no consumer yet); bets that
   arrive after settlement are not paid (admins resolve long after `endAt`; `ponytail:` comment).
 
-## M6 — Read side (2 days)
+## M6 — Read side (2 days) — ✅ done
 - Projection Service: `market_view`, `user_bet_view`, leaderboard; offset/eventId dedupe; Redis writes.
 - Query Service: endpoints from §8.8, Redis cache-aside.
 - Rebuild script: drop `read-db`, reset consumer group offsets, replay → same result (§15 #4).
   Requires topic retention long enough — set bet/market topics to infinite retention or compacted
   snapshots, otherwise replay is impossible after 90d. Note this in the doc.
+
+**Outcome (2026-10-08):** smoke reads the market, my bets (A WON, B LOST) and the leaderboard
+(A +280, B −300) through `:8080`. `scripts/rebuild-read-model.sh` drops `read_db` and the Redis
+keys, replays from offset 0, and the result is identical to the live-built model (26 docs/keys).
+Full build: 179 tests, every module ≥ 92% coverage (projection 98%, query 99%).
+Decisions and deferrals:
+- `shared/common` is now conditional (outbox needs a DataSource, Kafka parts need Kafka, web parts
+  need a servlet app), so read-side services reuse it without Postgres.
+- Idempotency without Mongo transactions: version-guarded upserts, recomputed pools, Lua-guarded
+  `ZINCRBY` per eventId. No offset collection.
+- Bug found by the live rebuild and fixed test-first: `settlement.completed` replayed before
+  `bet.placed` left bets `ACCEPTED`. The settlement result now lives on `market_view`, and a
+  shuffled-order test guards the whole projection.
+- `bet_view` (one doc per bet) instead of `user_bet_view` with an array; odds computed at read time.
+- Replayed topics keep events forever (`retention.ms=-1`); the doc says why.
+- Deferred: `/internal/projections/status`, `roi` on the leaderboard, payout amount per bet.
 
 ## M7 — Frontend + live updates (3–4 days)
 - Notification Service: STOMP `/ws`, JWT on CONNECT, Kafka → `/topic/public.markets`, `/user/queue/*`.

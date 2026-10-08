@@ -9,4 +9,6 @@ include(
     "services:market-service",
     "services:bet-service",
     "services:settlement-service",
+    "services:projection-service",
+    "services:query-service",
 )

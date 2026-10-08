@@ -58,6 +58,21 @@ spring:
                 - name: CircuitBreaker
                   args:
                     name: market-write
+            - id: query
+              uri: ${QUERY_SERVICE_URL:http://localhost:8087}
+              predicates:
+                - Path=/api/markets,/api/markets/**,/api/me/bets,/api/leaderboard,/api/users/*/stats
+                - Method=GET
+              filters:
+                - name: CircuitBreaker
+                  args:
+                    name: query
+                - name: Retry
+                  args:
+                    retries: 2
+                    methods: GET
+                    statuses: BAD_GATEWAY,SERVICE_UNAVAILABLE
+                    exceptions: java.io.IOException
             - id: bet
               uri: ${BET_SERVICE_URL:http://localhost:8084}
               predicates:
