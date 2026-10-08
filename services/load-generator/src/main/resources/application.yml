@@ -1,0 +1,17 @@
+server:
+  port: 8089
+spring:
+  application:
+    name: load-generator
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,prometheus
+loadgen:
+  gateway-url: ${GATEWAY_URL:http://localhost:8080}
+  users: ${LOAD_USERS:10000}
+  min-delay: ${LOAD_MIN_DELAY:10s}
+  max-delay: ${LOAD_MAX_DELAY:60s}
+  ramp-up: ${LOAD_RAMP_UP:10m}
+  enabled: ${LOAD_ENABLED:true}

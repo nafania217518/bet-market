@@ -253,6 +253,8 @@ services:
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      # The home page shows this dashboard instead of the empty welcome page.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/platform-overview.json
     volumes:
       - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
@@ -285,3 +287,25 @@ services:
       DATA_SOURCE_PASS: postgres
     depends_on:
       postgres: { condition: service_healthy }
+
+  # ---------- load generator: on demand only ----------
+  # docker compose --profile load up -d load-generator   (stop: docker compose stop load-generator)
+  # Bots register, log in, bet, browse and cancel through the gateway. They never create markets.
+  load-generator:
+    profiles: [load]
+    build: { context: ., args: { SERVICE: load-generator } }
+    environment:
+      GATEWAY_URL: http://api-gateway:8080
+      LOAD_USERS: ${LOAD_USERS:-10000}
+      LOAD_MIN_DELAY: ${LOAD_MIN_DELAY:-10s}
+      LOAD_MAX_DELAY: ${LOAD_MAX_DELAY:-60s}
+      LOAD_RAMP_UP: ${LOAD_RAMP_UP:-10m}
+      LOGGING_STRUCTURED_FORMAT_CONSOLE: logstash
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8089/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    depends_on:
+      api-gateway: { condition: service_healthy }

@@ -10,7 +10,7 @@ CLUSTER="${CLUSTER:-bet-market}"
 PORT="${PORT:-8000}"
 NS=bet-market
 IMAGES=(user-service wallet-service market-service bet-service settlement-service projection-service
-        query-service notification-service api-gateway frontend)
+        query-service notification-service api-gateway frontend load-generator)
 
 echo "1. cluster $CLUSTER (ingress on :$PORT)"
 k3d cluster list "$CLUSTER" > /dev/null 2>&1 \

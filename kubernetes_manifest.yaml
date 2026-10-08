@@ -647,6 +647,41 @@ spec:
   selector: { app: frontend }
   ports: [{ port: 80 }]
 ---
+# Load generator: on demand. Start: kubectl -n bet-market scale deployment/load-generator --replicas=1
+# Bots register, log in, bet, browse and cancel through the gateway. They never create markets.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: load-generator, namespace: bet-market }
+spec:
+  replicas: 0
+  selector: { matchLabels: { app: load-generator } }
+  template:
+    metadata: { labels: { app: load-generator } }
+    spec:
+      containers:
+        - name: load-generator
+          image: bet-market-load-generator:latest
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 8089 }]
+          env:
+            - { name: GATEWAY_URL, value: "http://api-gateway:8080" }
+            - { name: LOAD_USERS, value: "10000" }
+            - { name: LOAD_MIN_DELAY, value: 10s }
+            - { name: LOAD_MAX_DELAY, value: 60s }
+            - { name: LOAD_RAMP_UP, value: 10m }
+            - { name: LOGGING_STRUCTURED_FORMAT_CONSOLE, value: logstash }
+          resources:
+            requests: { cpu: 100m, memory: 384Mi }
+            limits: { memory: 768Mi }
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8089 }
+            periodSeconds: 5
+            failureThreshold: 36
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: 8089 }
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: 8089 }
+---
 # ingress-nginx is retired (March 2026). k3s ships Traefik as the Ingress controller.
 # nginx in the frontend pod proxies /api and /ws to api-gateway:8080.
 apiVersion: networking.k8s.io/v1

@@ -255,6 +255,13 @@ Decisions and deferrals:
   The "New market" page (`#/markets/new`) is open to every logged-in user.
 - Smoke step 8 now checks: a user creates 3 markets, the 4th is rejected, and a user cannot freeze.
 
+## Extra (2026-10-09): load generator
+- `services/load-generator` (`:8089`) runs 10,000 bots through the gateway, one virtual thread each.
+  Starts are spread over 10 minutes. Actions: bet 70%, browse 25%, cancel 5%, then a 10–60 s pause.
+- A bot without enough tokens retires, and a new bot registers in its slot. Bots never create markets.
+- Runs on demand: `docker compose --profile load up -d load-generator`. In Kubernetes, scale the
+  Deployment from 0. Grafana's Betting funnel shows its actions and bot counts.
+
 ## M10 — Stretch
 Tracing (OTLP + Tempo), Schema Registry + compatibility checks, Debezium outbox, load test (k6) with
 the freeze-time race, chaos (kill wallet mid-saga), wallet-integrity reconciliation job.

@@ -12,4 +12,5 @@ include(
     "services:projection-service",
     "services:query-service",
     "services:notification-service",
+    "services:load-generator",
 )

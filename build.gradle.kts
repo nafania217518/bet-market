@@ -64,7 +64,7 @@ configure(subprojects.filter { it.path.startsWith(":services:") }) {
 
 // Write-side services: runnable Spring Boot apps with JPA, Flyway, Kafka, Testcontainers.
 // The gateway (WebFlux) and the read side (MongoDB/Redis, no Postgres) have their own builds.
-val ownBuild = setOf("api-gateway", "projection-service", "query-service", "notification-service")
+val ownBuild = setOf("api-gateway", "projection-service", "query-service", "notification-service", "load-generator")
 configure(subprojects.filter { it.path.startsWith(":services:") && it.name !in ownBuild }) {
     apply(plugin = "org.springframework.boot")
     apply(plugin = "org.jetbrains.kotlin.plugin.jpa")

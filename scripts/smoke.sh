@@ -51,6 +51,14 @@ jwt_payload() {
   base64 -d <<< "$p"
 }
 
+# The payout checks need a quiet system: load-generator bots bet on every open market, the smoke market too.
+if [ -n "$K8S_NAMESPACE" ]; then
+  LOADGEN=$(kubectl -n "$K8S_NAMESPACE" get deployment load-generator -o jsonpath='{.status.readyReplicas}' 2>/dev/null || true)
+else
+  LOADGEN=$("${COMPOSE[@]}" ps -q --status running load-generator 2>/dev/null || true)
+fi
+[ -z "$LOADGEN" ] || [ "$LOADGEN" = 0 ] || fail "the load generator is running; stop it first (docker compose stop load-generator)"
+
 # An API route, not /actuator/health: through nginx or an ingress only /api and /ws reach the gateway.
 for _ in $(seq 1 60); do curl -fs "$API/api/markets" > /dev/null && break; sleep 2; done
 curl -fs "$API/api/markets" > /dev/null || fail "gateway is not up"
@@ -214,9 +222,12 @@ market_view_ok() {
   [ "$(json_field status <<< "$m")" = RESOLVED ] && [ "$(json_field totalPool <<< "$m")" = "$POOL" ]
 }
 my_bet_is() { curl -fs "$API/api/me/bets?status=$1" -H "Authorization: Bearer $TOKEN" | grep -q "\"marketId\":\"$MARKET_ID\""; }
+# Per-user stats, not the leaderboard: the leaderboard shows only the top 100, and after a load run
+# thousands of bots can push the smoke users out of it.
 net_profit_is() { # net_profit_is <userId> <amount>
-  [ "$(curl -fs "$API/api/leaderboard?window=all" | grep -o "\"userId\":\"$1\"[^}]*" | json_field netProfit)" = "$2" ]
+  [ "$(curl -fs "$API/api/users/$1/stats" -H "Authorization: Bearer $TOKEN" | json_field netProfit)" = "$2" ]
 }
+leaderboard_ok() { curl -fs "$API/api/leaderboard?window=all" | grep -q '"entries":\['; }
 
 echo "16. the public market view shows RESOLVED and the pool without a token"
 eventually "market view never showed RESOLVED with pool $POOL" market_view_ok
@@ -226,9 +237,10 @@ TOKEN=$A_TOKEN; eventually "A's bet is not WON" my_bet_is WON
 TOKEN=$B_TOKEN; eventually "B's bet is not LOST" my_bet_is LOST
 TOKEN=$A_TOKEN
 
-echo "18. leaderboard: A +$((PAYOUT - 100)), B -300"
+echo "18. net profit: A +$((PAYOUT - 100)), B -300; the leaderboard answers"
 eventually "A's net profit is not $((PAYOUT - 100))" net_profit_is "$USER_ID" $((PAYOUT - 100))
 eventually "B's net profit is not -300" net_profit_is "$B_ID" -300
+eventually "the leaderboard did not answer" leaderboard_ok
 
 echo "19. nginx serves the SPA and proxies /api to the gateway"
 curl -fs "$WEB/" | grep -q 'id="root"' || fail "nginx does not serve the SPA at $WEB/"
@@ -258,7 +270,8 @@ prom() {
     | python3 -c 'import json,sys; r=json.load(sys.stdin)["data"]["result"]; print(r[0]["value"][1] if r else "")'
 }
 prom_positive() { local v; v=$(prom "$1"); [ -n "$v" ] && python3 -c "import sys; sys.exit(0 if float('$v') > 0 else 1)"; }
-all_targets_up() { [ "$(prom 'count(up == 0)')" = "" ] && [ "$(prom 'count(up)')" = 12 ]; }
+# 12 = 9 services + 3 exporters. The on-demand load generator may add a 13th.
+all_targets_up() { [ "$(prom 'count(up == 0)')" = "" ] && [ "$(prom 'count(up)')" -ge 12 ]; }
 
 echo "22. Prometheus scrapes all 9 services and 3 exporters"
 eventually "a Prometheus target is down: $(prom 'count(up == 0)')" all_targets_up
@@ -280,10 +293,11 @@ eventually "the projection processed no events" prom_positive 'sum(projection_ev
 eventually "no Kafka consumer group lag series" prom_positive 'count(kafka_consumergroup_lag)'
 [ "$(prom 'wallet_balance_mismatch')" = 0 ] || fail "wallet_balance_mismatch is $(prom 'wallet_balance_mismatch'), expected 0"
 
-echo "25. Grafana serves the provisioned dashboards"
+echo "25. Grafana serves the provisioned dashboards; its home page is Platform overview"
 for uid in platform-overview betting-funnel; do
   eventually "Grafana has no dashboard $uid" curl -fs "$GRAFANA/api/dashboards/uid/$uid"
 done
+curl -fs "$GRAFANA/api/dashboards/home" | grep -q '"uid":"platform-overview"' || fail "Grafana's home page is not Platform overview"
 
 echo "26. services log JSON"
 for svc in bet-service projection-service api-gateway; do

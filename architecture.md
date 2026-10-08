@@ -875,6 +875,31 @@ GET  /actuator/health                     -> 200
 
 ---
 
+### 8.10 Load generator — `:8089` (on demand)
+
+| Aspect | Detail |
+|---|---|
+| **Tech** | Spring Boot, RestClient, virtual threads |
+| **Store** | none |
+| **Talks to** | the API gateway only, like a browser client |
+
+- Runs `LOAD_USERS` bots (default 10,000), one virtual thread each. Bot `i` starts at
+  `i × LOAD_RAMP_UP / LOAD_USERS` (default 10 minutes). The spread keeps registrations under the
+  gateway's per-IP rate limit.
+- Each bot registers, logs in, then loops: one action, then a random pause between
+  `LOAD_MIN_DELAY` and `LOAD_MAX_DELAY` (default 10–60 s). Actions: bet 70%, browse 25% (market,
+  my bets, wallet, ledger, leaderboard), cancel an own ACCEPTED bet 5%.
+- A bet uses a random OPEN market and a random amount in `[minBet, min(maxBet, available)]`.
+  One shared catalog refreshes the OPEN markets every 10 s.
+- A bot whose available tokens are below the smallest `minBet` of the open markets retires. A
+  new bot registers in its slot.
+- Bots never create markets. With no open market they only browse.
+- Metrics: `loadgen_actions_total{action,outcome}`, `loadgen_bots_active`,
+  `loadgen_bots_registered_total`, `loadgen_bots_retired_total`. Prometheus finds the service by DNS,
+  so a stopped generator is not a down target. Grafana's Betting funnel has two panels for it.
+- Start: `docker compose --profile load up -d load-generator`. Kubernetes: scale
+  `deployment/load-generator` (0 replicas by default).
+
 ## 9. Kafka topic design
 
 | Kafka topic | Key | Partitions | Retention | Producer | Consumers |
@@ -1259,6 +1284,7 @@ The rules live in `infra/prometheus/alerts.yml`. `alerts.test.yml` holds promtoo
 | projection-service | 8086 |
 | query-service | 8087 |
 | notification-service | 8088 |
+| load-generator (on demand) | 8089 |
 | kafka-ui (optional) | 8090 |
 | mongo-express (optional) | 8091 |
 | kafka (host listener) | 9092 |
