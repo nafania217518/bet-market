@@ -1,6 +1,7 @@
 package com.betting.wallet
 
 import org.springframework.boot.test.context.SpringBootTest
+import org.springframework.boot.micrometer.metrics.test.autoconfigure.AutoConfigureMetrics
 import org.springframework.boot.test.context.TestConfiguration
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc
@@ -20,5 +21,6 @@ class Containers {
 
 @SpringBootTest
 @AutoConfigureMockMvc
+@AutoConfigureMetrics
 @Import(Containers::class)
 abstract class IntegrationTest

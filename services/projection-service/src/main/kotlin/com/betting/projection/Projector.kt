@@ -20,6 +20,7 @@ import com.mongodb.client.model.UpdateOptions
 import com.mongodb.client.model.Updates.combine
 import com.mongodb.client.model.Updates.set
 import com.mongodb.client.model.Updates.setOnInsert
+import io.micrometer.core.instrument.MeterRegistry
 import jakarta.annotation.PostConstruct
 import org.bson.Document
 import org.bson.conversions.Bson
@@ -35,7 +36,7 @@ import java.util.UUID
 
 /** Builds the read model (Mongo read_db + Redis leaderboards). Every write is idempotent and order-tolerant. */
 @Component
-class Projector(private val mongo: MongoTemplate, private val redis: StringRedisTemplate) {
+class Projector(private val mongo: MongoTemplate, private val redis: StringRedisTemplate, private val registry: MeterRegistry) {
     private val upsert = UpdateOptions().upsert(true)
     private val markets get() = mongo.getCollection("market_view")
     private val bets get() = mongo.getCollection("bet_view")
@@ -76,6 +77,7 @@ class Projector(private val mongo: MongoTemplate, private val redis: StringRedis
             }
             else -> if (e.eventType.startsWith("market.")) market(EventJson.payload(e, MarketV1::class))
         }
+        registry.counter("projection.events.processed", "event_type", e.eventType).increment()
     }
 
     private fun market(m: MarketV1) {

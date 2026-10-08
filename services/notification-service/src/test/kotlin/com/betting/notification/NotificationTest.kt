@@ -21,6 +21,7 @@ import org.awaitility.kotlin.untilAsserted
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.micrometer.metrics.test.autoconfigure.AutoConfigureMetrics
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.context.TestConfiguration
 import org.springframework.boot.test.web.server.LocalServerPort
@@ -70,6 +71,7 @@ class TestBeans {
     ],
 )
 @Import(TestBeans::class)
+@AutoConfigureMetrics
 class NotificationTest {
     @LocalServerPort var port = 0
     @Autowired lateinit var kafka: KafkaTemplate<String, String>
@@ -206,5 +208,14 @@ class NotificationTest {
     fun `health is UP`() {
         val body = RestClient.create().get().uri("http://localhost:$port/actuator/health").retrieve().body(String::class.java)
         assertTrue(body!!.contains("\"UP\""))
+    }
+
+    @Test
+    fun `actuator prometheus exposes JVM metrics and the HTTP latency histogram`() {
+        val http = RestClient.create("http://localhost:$port")
+        http.get().uri("/actuator/health").retrieve().toBodilessEntity()
+        val body = http.get().uri("/actuator/prometheus").retrieve().body(String::class.java)!!
+        assertTrue(body.contains("jvm_memory_used_bytes"))
+        assertTrue(body.contains("http_server_requests_seconds_bucket"))
     }
 }

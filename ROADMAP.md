@@ -197,12 +197,32 @@ Decisions and deferrals:
 - Known limit: behind nginx, all anonymous users share one gateway rate-limit bucket (key = the nginx IP).
   Trust `X-Forwarded-For` from nginx only, if that matters.
 
-## M8 — Observability (1–2 days)
+## M8 — Observability (1–2 days) ✅ done
 - Actuator/Prometheus on every service (mostly config in a shared `application.yml` fragment).
 - Custom metrics from §12 (bet, wallet, market, settlement, db-scheduler).
 - Prometheus + alerts, Grafana provisioning, exporters (kafka/redis/postgres).
 - Dashboards: start with Platform overview + Betting funnel; add others as needed.
 - JSON logs via logstash encoder.
+
+**Outcome (2026-10-09):** smoke steps 22–26 pass.
+- Prometheus scrapes 12 targets (9 services, 3 exporters).
+- The alert rules pass 12 promtool unit tests.
+- The custom metrics show this run's bets, reservations, freeze task, settlement and payouts.
+  `wallet_balance_mismatch` is 0.
+- Grafana serves both dashboards, and every panel query returns data.
+- The services log JSON.
+- Full build: 221 JVM tests, every module ≥ 92% coverage.
+Decisions and deferrals:
+- No `logstash-logback-encoder`: Boot's built-in structured logging writes the same Logstash JSON.
+- db-scheduler metrics and health come from the starter (`dbscheduler_task_*`, `dbScheduler`).
+  No custom scheduler metrics.
+- Kafka lag comes from kafka-exporter (`kafka_consumergroup_lag`), not from a custom gauge.
+- Scheduler-run events now carry a correlation id (deferred from M3).
+- Skipped:
+  - `wallet_balance_tokens{userId}`, because a per-user label grows without limit.
+  - A scheduled-task backlog gauge, Alertmanager, and dashboards 3–6.
+- Config is per service: two `management` lines in each `application.yml`, not a shared fragment.
+  The gateway does not use `shared:common`.
 
 ## M9 — Kubernetes manifest (1–2 days)
 - Single `kubernetes_manifest.yaml`: Namespace, ConfigMap/Secret, StatefulSets for postgres/kafka/mongo/redis,

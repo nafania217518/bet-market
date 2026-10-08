@@ -1,0 +1,46 @@
+groups:
+  - name: bet-market
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.instance }} ({{ $labels.job }}) is down"
+
+      - alert: KafkaConsumerLagHigh
+        expr: sum by (consumergroup, topic) (kafka_consumergroup_lag) > 1000
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Consumer group {{ $labels.consumergroup }} lags {{ $value }} messages on {{ $labels.topic }}"
+
+      - alert: BetPlacementSlow
+        expr: histogram_quantile(0.99, sum by (le) (rate(bet_placement_duration_seconds_bucket[5m]))) > 1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Bet placement p99 is above 1s"
+
+      - alert: DeadLetterTopicNotEmpty
+        expr: |
+          sum by (topic) (
+            kafka_topic_partition_current_offset{topic=~".*\\.DLT"}
+            - kafka_topic_partition_oldest_offset{topic=~".*\\.DLT"}
+          ) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "Dead letter topic {{ $labels.topic }} holds {{ $value }} messages"
+
+      - alert: WalletBalanceMismatch
+        expr: wallet_balance_mismatch > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "Wallet balance mismatch detected ({{ $value }})"
+
+      - alert: SchedulerTaskFailing
+        expr: increase(dbscheduler_task_completions_total{result="failed"}[5m]) > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "db-scheduler task {{ $labels.task }} is failing"

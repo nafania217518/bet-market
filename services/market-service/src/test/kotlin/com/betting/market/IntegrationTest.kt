@@ -52,7 +52,8 @@ class Containers {
 }
 
 // Same config in every subclass -> Spring caches one context, containers start once.
-@SpringBootTest(properties = ["outbox.poll-interval-ms=200", "db-scheduler.polling-interval=200ms", "db-scheduler.heartbeat-interval=1s"])
+@org.springframework.boot.micrometer.metrics.test.autoconfigure.AutoConfigureMetrics
+@SpringBootTest(properties = ["management.endpoint.health.show-components=always", "outbox.poll-interval-ms=200", "db-scheduler.polling-interval=200ms", "db-scheduler.heartbeat-interval=1s"])
 @AutoConfigureMockMvc
 @Import(Containers::class)
 abstract class IntegrationTest {

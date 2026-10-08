@@ -1,0 +1,26 @@
+# Local dev. No Alertmanager: firing alerts show in the Prometheus UI (/alerts).
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+rule_files: [alerts.yml]
+
+scrape_configs:
+  - job_name: services
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - {targets: ["api-gateway:8080"], labels: {application: api-gateway}}
+      - {targets: ["user-service:8081"], labels: {application: user-service}}
+      - {targets: ["wallet-service:8082"], labels: {application: wallet-service}}
+      - {targets: ["market-service:8083"], labels: {application: market-service}}
+      - {targets: ["bet-service:8084"], labels: {application: bet-service}}
+      - {targets: ["settlement-service:8085"], labels: {application: settlement-service}}
+      - {targets: ["projection-service:8086"], labels: {application: projection-service}}
+      - {targets: ["query-service:8087"], labels: {application: query-service}}
+      - {targets: ["notification-service:8088"], labels: {application: notification-service}}
+  - job_name: kafka-exporter
+    static_configs: [{targets: ["kafka-exporter:9308"]}]
+  - job_name: redis-exporter
+    static_configs: [{targets: ["redis-exporter:9121"]}]
+  - job_name: postgres-exporter
+    static_configs: [{targets: ["postgres-exporter:9187"]}]

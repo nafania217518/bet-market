@@ -73,3 +73,46 @@ Sources:
 - https://noregressions.dev/guides/migration/cards/mongodb-property-renames.html (old prefix silently ignored)
 - https://stackoverflow.com/questions/23515295/spring-boot-and-how-to-configure-connection-details-to-mongodb (`spring.mongodb.uri`)
 - Boot 4.1.1 jar metadata (checked by the projection and query agents)
+
+## Metrics in tests: `@AutoConfigureMetrics` (Boot 4)
+Checked 2026-10-09.
+- Boot 4.0 removed `@AutoConfigureObservability`. The replacement for metrics is
+  `@AutoConfigureMetrics` in the module `spring-boot-micrometer-metrics-test`
+  (package `org.springframework.boot.micrometer.metrics.test.autoconfigure`). Tracing has its own
+  `spring-boot-micrometer-tracing-test` module.
+- `spring-boot-starter-test` does not include it. The root build adds it to every service.
+- Without the annotation, a `@SpringBootTest` disables metrics export, so `/actuator/prometheus`
+  is missing in tests. With it, export is on by default (`export = true`).
+- One migration guide says the annotation has "no replacement". The 4.1.1 Javadoc and jar show
+  that `@AutoConfigureMetrics` exists and works (all `MetricsTest` classes use it).
+
+Sources:
+- https://docs.spring.io/spring-boot/api/java/org/springframework/boot/micrometer/metrics/test/autoconfigure/AutoConfigureMetrics.html (since 4.0.0, `export` default true)
+- Maven Central `spring-boot-micrometer-metrics-test-4.1.1.jar` (contains `AutoConfigureMetrics` and `DisableMetricsExportContextCustomizer`)
+- https://stackoverflow.com/questions/79867953 (dependency for `@AutoConfigureMetrics` after the 4.0 upgrade)
+- https://noregressions.dev/guides/migration/cards/auto-configure-observability-removed.html (old annotation removed)
+- https://docs.spring.io/spring-boot/3.4/api/java/org/springframework/boot/test/autoconfigure/actuate/observability/AutoConfigureObservability.html (the Boot 3 annotation)
+
+## Structured JSON logs are built in (Boot 3.4+)
+Checked 2026-10-09.
+- `logging.structured.format.console=logstash` writes Logstash JSON. No `logstash-logback-encoder`
+  dependency is needed. MDC entries (our `correlationId`) appear as JSON fields.
+- docker-compose sets it with `LOGGING_STRUCTURED_FORMAT_CONSOLE`. Tests and local runs keep plain logs.
+
+Sources:
+- https://docs.spring.io/spring-boot/reference/features/logging.html#features.logging.structured (4.1.1)
+- https://www.baeldung.com/spring-boot-structured-logging
+- https://springframework.guru/how-to-structured-logging-with-spring-boot/
+- https://howtodoinjava.com/spring-boot/structured-logging-example/
+
+## db-scheduler metrics and health on Boot 4 (starter 16.12.0)
+Checked 2026-10-09.
+- With Micrometer present, the starter registers `MicrometerStatsRegistry`. It exports
+  `dbscheduler_task_completions_total{task,result="ok|failed"}`, `dbscheduler_task_duration_seconds{task}`,
+  `dbscheduler_task_last_run_duration` and `dbscheduler_task_last_run_timestamp_seconds`.
+- The health component is named `dbScheduler`, not `db-scheduler`.
+
+Sources:
+- String constants in `MicrometerStatsRegistry.class` and `DbSchedulerActuatorAutoConfiguration.class` (16.12.0 jars)
+- https://deepwiki.com/kagkarlsson/db-scheduler/7.2-monitoring-and-metrics
+- market-service tests `actuator prometheus exposes ... db-scheduler task completions` and `health includes db-scheduler`

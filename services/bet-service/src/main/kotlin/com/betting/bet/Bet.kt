@@ -10,6 +10,8 @@ import jakarta.persistence.Entity
 import jakarta.persistence.Id
 import jakarta.persistence.LockModeType
 import jakarta.persistence.Table
+import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.Timer
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.dao.DataIntegrityViolationException
@@ -139,13 +141,30 @@ class BetService(
     private val wallet: WalletClient,
     private val outbox: OutboxWriter,
     txManager: PlatformTransactionManager,
+    private val meters: MeterRegistry,
 ) {
+    private val timer = Timer.builder("bet.placement.duration").publishPercentileHistogram().register(meters)
     private val log = LoggerFactory.getLogger(javaClass)
     private val tx = TransactionTemplate(txManager)
     private val newTx = TransactionTemplate(txManager).apply { propagationBehavior = TransactionDefinition.PROPAGATION_REQUIRES_NEW }
 
-    fun place(userId: UUID, key: String, req: PlaceBetRequest): BetResponse {
-        bets.findByUserIdAndIdempotencyKey(userId, key)?.let { return replay(it, req) }
+    fun place(userId: UUID, key: String, req: PlaceBetRequest): BetResponse = timer.recordCallable {
+        try {
+            doPlace(userId, key, req)?.also { count(req, "ACCEPTED") } ?: replay(userId, key, req)
+        } catch (e: ApiException) {
+            count(req, e.code)
+            throw e
+        }
+    }!!
+
+    // The side tag is user input: clamp it so a bad side cannot create unbounded series.
+    private fun count(req: PlaceBetRequest, status: String) = meters.counter("bets.placed", "side", req.side.takeIf { it == "TRUE" || it == "FALSE" } ?: "INVALID", "status", status).increment()
+
+    private fun replay(userId: UUID, key: String, req: PlaceBetRequest) = replay(bets.findByUserIdAndIdempotencyKey(userId, key)!!, req)
+
+    /** Returns null when the Idempotency-Key was already used (a replay, not counted). */
+    private fun doPlace(userId: UUID, key: String, req: PlaceBetRequest): BetResponse? {
+        bets.findByUserIdAndIdempotencyKey(userId, key)?.let { return null }
         if (req.side != "TRUE" && req.side != "FALSE") throw invalid("side must be TRUE or FALSE")
         val market = snapshots.find(req.marketId) ?: throw ApiException(HttpStatus.NOT_FOUND, "MARKET_NOT_FOUND", "Market not found")
         if (!market.isOpen()) throw notOpen()
@@ -164,7 +183,7 @@ class BetService(
             // ponytail: if both the wallet release and bet-db fail, the reservation stays held; add a reservation sweeper when this matters.
             wallet.release(bet.id)
             if (e is DataIntegrityViolationException) {
-                bets.findByUserIdAndIdempotencyKey(userId, key)?.let { return replay(it, req) }
+                bets.findByUserIdAndIdempotencyKey(userId, key)?.let { return null }
             }
             log.error("Bet {} not stored", bet.id, e)
             runCatching {

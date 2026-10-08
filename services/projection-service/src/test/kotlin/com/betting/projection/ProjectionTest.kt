@@ -44,6 +44,8 @@ class Containers {
     fun redisContainer(): GenericContainer<*> = GenericContainer("redis:7-alpine").withExposedPorts(6379)
 }
 
+@org.springframework.boot.micrometer.metrics.test.autoconfigure.AutoConfigureMetrics
+@org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc
 @SpringBootTest(properties = ["spring.kafka.producer.value-serializer=org.apache.kafka.common.serialization.StringSerializer"])
 @Import(Containers::class)
 class ProjectionTest {
@@ -51,6 +53,29 @@ class ProjectionTest {
     @Autowired lateinit var mongo: MongoTemplate
     @Autowired lateinit var redis: StringRedisTemplate
     @Autowired lateinit var kafka: KafkaTemplate<String, String>
+    @Autowired lateinit var registry: io.micrometer.core.instrument.MeterRegistry
+    @Autowired lateinit var mvc: org.springframework.test.web.servlet.MockMvc
+
+    fun processed(type: String) = registry.find("projection.events.processed").tag("event_type", type).counter()?.count() ?: 0.0
+
+    @Test
+    fun `each applied event increments projection events processed for its type`() {
+        val m = UUID.randomUUID()
+        val (created, placed) = processed(EventTypes.MARKET_CREATED) to processed(EventTypes.BET_PLACED)
+        val e = env(EventTypes.MARKET_CREATED, market(m, 1))
+        projector.apply(e)
+        projector.apply(e) // duplicates count too
+        projector.apply(env(EventTypes.BET_PLACED, bet(m, UUID.randomUUID(), "TRUE", 10)))
+        assertEquals(created + 2, processed(EventTypes.MARKET_CREATED))
+        assertEquals(placed + 1, processed(EventTypes.BET_PLACED))
+    }
+
+    @Test
+    fun `actuator prometheus exposes projection events processed total`() {
+        projector.apply(env(EventTypes.MARKET_CREATED, market(UUID.randomUUID(), 1)))
+        val body = mvc.perform(org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get("/actuator/prometheus")).andReturn().response.contentAsString
+        kotlin.test.assertTrue("projection_events_processed_total{event_type=\"market.created\"}" in body)
+    }
 
     val day: Instant = Instant.parse("2026-10-08T12:00:00Z")
     val freezeAt: Instant = Instant.parse("2026-10-09T00:00:00Z")

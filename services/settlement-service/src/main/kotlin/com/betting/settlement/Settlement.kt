@@ -21,7 +21,13 @@ import org.springframework.kafka.annotation.KafkaListener
 import org.springframework.stereotype.Component
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
+import com.betting.common.CorrelationId
+import io.micrometer.core.instrument.MeterRegistry
+import io.micrometer.core.instrument.Timer
 import org.slf4j.LoggerFactory
+import org.slf4j.MDC
+import org.springframework.transaction.support.TransactionSynchronization
+import org.springframework.transaction.support.TransactionSynchronizationManager
 import java.sql.Timestamp
 import java.time.Duration
 import java.time.Instant
@@ -57,11 +63,16 @@ class SettlementBets(private val jdbc: JdbcClient) {
 @Configuration
 class SettlementTasks {
     @Bean
-    fun settleTask(service: SettlementService): OneTimeTask<Void> =
-        Tasks.oneTime(SETTLE_TASK)
+    fun settleTask(service: SettlementService, registry: MeterRegistry): OneTimeTask<Void> {
+        val timer = Timer.builder("settlement.duration").publishPercentileHistogram().register(registry)
+        return Tasks.oneTime(SETTLE_TASK)
             // A thrown exception rolls back the settlement transaction; the scheduler runs it again after 1s, 2s, 4s, ...
             .onFailure(FailureHandler.ExponentialBackoffFailureHandler(Duration.ofSeconds(1), 2.0))
-            .execute { inst, _ -> service.settle(UUID.fromString(inst.id)) }
+            // Scheduler runs have no request: give the events they emit a fresh correlation id.
+            .execute { inst, _ ->
+                MDC.putCloseable(CorrelationId.MDC_KEY, UUID.randomUUID().toString()).use { timer.record(Runnable { service.settle(UUID.fromString(inst.id)) }) }
+            }
+    }
 }
 
 private data class Pending(val outcome: String, val winningSide: String?, val freezeAt: Instant, val status: String)
@@ -74,6 +85,7 @@ class SettlementService(
     private val outbox: OutboxWriter,
     @Lazy private val scheduler: SchedulerClient, // @Lazy breaks the cycle: scheduler -> tasks -> service.
     @Value("\${settlement.house-edge-bps}") private val edgeBps: Int,
+    private val registry: MeterRegistry,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
@@ -108,6 +120,10 @@ class SettlementService(
         outbox.append(EventTypes.PAYOUT_CALCULATED, marketId.toString(), PayoutCalculatedV1(marketId, s.payouts))
         outbox.append(EventTypes.SETTLEMENT_COMPLETED, marketId.toString(),
             SettlementCompletedV1(marketId, outcome, winningSide, s.truePool, s.falsePool, s.paidOut, s.houseAmount, s.betCount))
+        // Count only after commit: a failed attempt rolls back and retries, it must not count twice.
+        TransactionSynchronizationManager.registerSynchronization(object : TransactionSynchronization {
+            override fun afterCommit() = s.payouts.forEach { registry.counter("payouts", "type", it.type).increment() }
+        })
     }
 }
 

@@ -1,0 +1,139 @@
+rule_files: [alerts.yml]
+evaluation_interval: 1m
+
+tests:
+  - name: ServiceDown fires when a target is down for 1m
+    interval: 1m
+    input_series:
+      - series: 'up{job="services",instance="bet-service:8084",application="bet-service"}'
+        values: '0x3'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: ServiceDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: services, instance: "bet-service:8084", application: bet-service}
+            exp_annotations: {summary: "bet-service:8084 (services) is down"}
+
+  - name: ServiceDown stays quiet when targets are up
+    interval: 1m
+    input_series:
+      - series: 'up{job="services",instance="bet-service:8084"}'
+        values: '1x3'
+    alert_rule_test:
+      - {eval_time: 2m, alertname: ServiceDown, exp_alerts: []}
+
+  - name: KafkaConsumerLagHigh fires when summed lag per group and topic exceeds 1000 for 5m
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumergroup_lag{consumergroup="g",topic="bets",partition="0"}'
+        values: '600x10'
+      - series: 'kafka_consumergroup_lag{consumergroup="g",topic="bets",partition="1"}'
+        values: '600x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: KafkaConsumerLagHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, consumergroup: g, topic: bets}
+            exp_annotations: {summary: "Consumer group g lags 1200 messages on bets"}
+
+  - name: KafkaConsumerLagHigh stays quiet when lag is low
+    interval: 1m
+    input_series:
+      - series: 'kafka_consumergroup_lag{consumergroup="g",topic="bets",partition="0"}'
+        values: '10x10'
+    alert_rule_test:
+      - {eval_time: 6m, alertname: KafkaConsumerLagHigh, exp_alerts: []}
+
+  - name: BetPlacementSlow fires when p99 exceeds 1s for 5m
+    interval: 1m
+    input_series:
+      - series: 'bet_placement_duration_seconds_bucket{le="1"}'
+        values: '0x15'
+      - series: 'bet_placement_duration_seconds_bucket{le="5"}'
+        values: '0+10x15'
+      - series: 'bet_placement_duration_seconds_bucket{le="+Inf"}'
+        values: '0+10x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: BetPlacementSlow
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations: {summary: "Bet placement p99 is above 1s"}
+
+  - name: BetPlacementSlow stays quiet when placements are fast
+    interval: 1m
+    input_series:
+      - series: 'bet_placement_duration_seconds_bucket{le="1"}'
+        values: '0+10x15'
+      - series: 'bet_placement_duration_seconds_bucket{le="+Inf"}'
+        values: '0+10x15'
+    alert_rule_test:
+      - {eval_time: 12m, alertname: BetPlacementSlow, exp_alerts: []}
+
+  - name: DeadLetterTopicNotEmpty fires when a DLT topic holds messages
+    interval: 1m
+    input_series:
+      - series: 'kafka_topic_partition_current_offset{topic="bets.DLT",partition="0"}'
+        values: '3x3'
+      - series: 'kafka_topic_partition_oldest_offset{topic="bets.DLT",partition="0"}'
+        values: '0x3'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: DeadLetterTopicNotEmpty
+        exp_alerts:
+          - exp_labels: {severity: critical, topic: bets.DLT}
+            exp_annotations: {summary: "Dead letter topic bets.DLT holds 3 messages"}
+
+  - name: DeadLetterTopicNotEmpty stays quiet for empty DLT and normal topics
+    interval: 1m
+    input_series:
+      - series: 'kafka_topic_partition_current_offset{topic="bets.DLT",partition="0"}'
+        values: '5x3'
+      - series: 'kafka_topic_partition_oldest_offset{topic="bets.DLT",partition="0"}'
+        values: '5x3'
+      - series: 'kafka_topic_partition_current_offset{topic="bets",partition="0"}'
+        values: '9x3'
+      - series: 'kafka_topic_partition_oldest_offset{topic="bets",partition="0"}'
+        values: '0x3'
+    alert_rule_test:
+      - {eval_time: 1m, alertname: DeadLetterTopicNotEmpty, exp_alerts: []}
+
+  - name: WalletBalanceMismatch fires when mismatch is above zero
+    interval: 1m
+    input_series:
+      - series: 'wallet_balance_mismatch{application="wallet-service"}'
+        values: '2x3'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: WalletBalanceMismatch
+        exp_alerts:
+          - exp_labels: {severity: critical, application: wallet-service}
+            exp_annotations: {summary: "Wallet balance mismatch detected (2)"}
+
+  - name: WalletBalanceMismatch stays quiet at zero
+    interval: 1m
+    input_series:
+      - series: 'wallet_balance_mismatch{application="wallet-service"}'
+        values: '0x3'
+    alert_rule_test:
+      - {eval_time: 1m, alertname: WalletBalanceMismatch, exp_alerts: []}
+
+  - name: SchedulerTaskFailing fires when a task keeps failing for 5m
+    interval: 1m
+    input_series:
+      - series: 'dbscheduler_task_completions_total{task="close-market",result="failed"}'
+        values: '0+1x15'
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: SchedulerTaskFailing
+        exp_alerts:
+          - exp_labels: {severity: warning, task: close-market, result: failed}
+            exp_annotations: {summary: "db-scheduler task close-market is failing"}
+
+  - name: SchedulerTaskFailing stays quiet when failures do not grow
+    interval: 1m
+    input_series:
+      - series: 'dbscheduler_task_completions_total{task="close-market",result="failed"}'
+        values: '3x15'
+    alert_rule_test:
+      - {eval_time: 12m, alertname: SchedulerTaskFailing, exp_alerts: []}

@@ -53,6 +53,15 @@ subprojects {
     tasks.named("check") { dependsOn("jacocoTestCoverageVerification") }
 }
 
+// M8: every service exposes /actuator/prometheus.
+configure(subprojects.filter { it.path.startsWith(":services:") }) {
+    dependencies {
+        "runtimeOnly"("io.micrometer:micrometer-registry-prometheus")
+        // Boot 4: @AutoConfigureMetrics (was @AutoConfigureObservability) turns metrics export on in tests.
+        "testImplementation"("org.springframework.boot:spring-boot-micrometer-metrics-test")
+    }
+}
+
 // Write-side services: runnable Spring Boot apps with JPA, Flyway, Kafka, Testcontainers.
 // The gateway (WebFlux) and the read side (MongoDB/Redis, no Postgres) have their own builds.
 val ownBuild = setOf("api-gateway", "projection-service", "query-service", "notification-service")

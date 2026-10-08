@@ -19,7 +19,10 @@ spring:
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
 server.port: 8085
-management.endpoints.web.exposure.include: health
+management:
+  endpoints.web.exposure.include: health,prometheus
+  # Histogram buckets let Grafana and alerts compute p95/p99 latency.
+  metrics.distribution.percentiles-histogram.http.server.requests: true
 settlement.house-edge-bps: ${HOUSE_EDGE_BPS:500}
 db-scheduler:
   polling-interval: ${SCHEDULER_POLLING_INTERVAL:10s}

@@ -9,4 +9,7 @@ spring:
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
 server.port: 8088
 notification.jwks-uri: ${USER_SERVICE_URL:http://localhost:8081}/.well-known/jwks.json
-management.endpoints.web.exposure.include: health
+management:
+  endpoints.web.exposure.include: health,prometheus
+  # Histogram buckets let Grafana and alerts compute p95/p99 latency.
+  metrics.distribution.percentiles-histogram.http.server.requests: true

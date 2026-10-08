@@ -4,4 +4,7 @@ spring:
   data.redis.host: ${REDIS_HOST:localhost}
 server.port: 8087
 query.house-edge-bps: ${HOUSE_EDGE_BPS:500}
-management.endpoints.web.exposure.include: health
+management:
+  endpoints.web.exposure.include: health,prometheus
+  # Histogram buckets let Grafana and alerts compute p95/p99 latency.
+  metrics.distribution.percentiles-histogram.http.server.requests: true

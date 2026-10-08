@@ -7,6 +7,8 @@ import com.betting.events.EventJson
 import com.betting.events.EventTypes
 import com.betting.events.UserRegisteredV1
 import com.betting.events.WalletCreatedV1
+import io.micrometer.core.instrument.Gauge
+import io.micrometer.core.instrument.MeterRegistry
 import jakarta.persistence.Entity
 import jakarta.persistence.LockModeType
 import jakarta.persistence.Id
@@ -19,6 +21,7 @@ import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.data.jpa.repository.Lock
 import org.springframework.data.jpa.repository.Query
 import org.springframework.http.HttpStatus
+import org.springframework.jdbc.core.simple.JdbcClient
 import org.springframework.kafka.annotation.KafkaListener
 import org.springframework.stereotype.Component
 import org.springframework.web.bind.annotation.GetMapping
@@ -58,6 +61,20 @@ interface WalletRepository : JpaRepository<Wallet, UUID> {
 }
 interface LedgerEntryRepository : JpaRepository<LedgerEntry, UUID> {
     fun findByUserIdOrderByCreatedAtDesc(userId: UUID, pageable: Pageable): List<LedgerEntry>
+}
+
+// RESERVE and RELEASE entries move `reserved` only, so the balance is SUM(CREDIT) - SUM(DEBIT).
+@Component
+class BalanceMismatchGauge(jdbc: JdbcClient, meters: MeterRegistry) {
+    init {
+        // ponytail: full scan per scrape, move to a periodic job if wallets grow.
+        Gauge.builder("wallet.balance.mismatch") {
+            jdbc.sql(
+                """SELECT count(*) FROM wallets w WHERE w.balance <> COALESCE((SELECT SUM(CASE l.type WHEN 'CREDIT' THEN l.amount
+                   WHEN 'DEBIT' THEN -l.amount ELSE 0 END) FROM ledger_entries l WHERE l.user_id = w.user_id), 0)""",
+            ).query(Long::class.java).single()
+        }.register(meters)
+    }
 }
 
 @Component

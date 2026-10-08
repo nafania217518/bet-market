@@ -14,7 +14,11 @@ import jakarta.persistence.Entity
 import jakarta.persistence.Id
 import jakarta.persistence.LockModeType
 import jakarta.persistence.Table
+import io.micrometer.core.instrument.Gauge
+import io.micrometer.core.instrument.MeterRegistry
 import org.slf4j.LoggerFactory
+import org.slf4j.MDC
+import com.betting.common.CorrelationId
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Lazy
@@ -51,6 +55,8 @@ interface MarketRepository : JpaRepository<Market, UUID> {
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select m from Market m where m.id = :id")
     fun lockById(id: UUID): Market?
+
+    fun countByStatus(status: String): Long
 }
 
 data class CreateMarketRequest(
@@ -72,12 +78,17 @@ class MarketTasks {
     // No task data: the instance id is the market id.
     @Bean
     fun freezeTask(service: MarketService): OneTimeTask<Void> =
-        Tasks.oneTime(FREEZE_TASK).execute { inst, _ -> service.freezeByScheduler(UUID.fromString(inst.id)) }
+        Tasks.oneTime(FREEZE_TASK).execute { inst, _ -> withCorrelationId { service.freezeByScheduler(UUID.fromString(inst.id)) } }
 
     @Bean
     fun endTask(service: MarketService): OneTimeTask<Void> =
-        Tasks.oneTime(END_TASK).execute { inst, _ -> service.endByScheduler(UUID.fromString(inst.id)) }
+        Tasks.oneTime(END_TASK).execute { inst, _ -> withCorrelationId { service.endByScheduler(UUID.fromString(inst.id)) } }
 }
+
+/** Scheduler runs have no request: give the events they emit a fresh correlation id. */
+fun withCorrelationId(block: () -> Unit) = MDC.putCloseable(CorrelationId.MDC_KEY, UUID.randomUUID().toString()).use { block() }
+
+val STATUSES = listOf("OPEN", "FROZEN", "ENDED", "RESOLVED", "CANCELLED")
 
 @Service
 @Transactional
@@ -85,8 +96,13 @@ class MarketService(
     private val markets: MarketRepository,
     private val outbox: OutboxWriter,
     @Lazy private val scheduler: SchedulerClient, // @Lazy breaks the cycle: scheduler -> tasks -> service.
+    private val registry: MeterRegistry,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
+
+    init {
+        STATUSES.forEach { s -> Gauge.builder("markets.by.status", markets) { it.countByStatus(s).toDouble() }.tag("status", s).register(registry) }
+    }
 
     fun create(req: CreateMarketRequest, createdBy: UUID): MarketV1 {
         val m = Market(UUID.randomUUID(), req.title.trim(), req.description, "OPEN", null, req.freezeAt, req.endAt, req.minBet, req.maxBet, createdBy)
@@ -113,13 +129,13 @@ class MarketService(
         return change(m, EventTypes.MARKET_UPDATED)
     }
 
-    fun freeze(id: UUID): MarketV1 = load(id).let { require(it, "OPEN"); it.status = "FROZEN"; change(it, EventTypes.MARKET_FROZEN) }
+    fun freeze(id: UUID): MarketV1 = load(id).let { require(it, "OPEN"); move(it, "FROZEN"); change(it, EventTypes.MARKET_FROZEN) }
 
     fun resolve(id: UUID, winningSide: String): MarketV1 {
         if (winningSide !in setOf("TRUE", "FALSE")) invalid("winningSide must be TRUE or FALSE")
         val m = load(id)
         require(m, "ENDED")
-        m.status = "RESOLVED"
+        move(m, "RESOLVED")
         m.winningSide = winningSide
         return change(m, EventTypes.MARKET_RESOLVED)
     }
@@ -127,7 +143,7 @@ class MarketService(
     fun cancel(id: UUID) {
         val m = load(id)
         require(m, "OPEN", "FROZEN", "ENDED")
-        m.status = "CANCELLED"
+        move(m, "CANCELLED")
         change(m, EventTypes.MARKET_CANCELLED)
     }
 
@@ -135,15 +151,15 @@ class MarketService(
     fun freezeByScheduler(id: UUID) {
         val m = lockOrWarn(id) ?: return
         if (m.status != "OPEN") return
-        m.status = "FROZEN"
+        move(m, "FROZEN")
         change(m, EventTypes.MARKET_FROZEN)
     }
 
     fun endByScheduler(id: UUID) {
         val m = lockOrWarn(id) ?: return
-        if (m.status == "OPEN") { m.status = "FROZEN"; change(m, EventTypes.MARKET_FROZEN) } // Freeze task was late.
+        if (m.status == "OPEN") { move(m, "FROZEN"); change(m, EventTypes.MARKET_FROZEN) } // Freeze task was late.
         if (m.status != "FROZEN") return
-        m.status = "ENDED"
+        move(m, "ENDED")
         change(m, EventTypes.MARKET_ENDED)
     }
 
@@ -153,6 +169,11 @@ class MarketService(
 
     private fun require(m: Market, vararg allowed: String) {
         if (m.status !in allowed) throw ApiException(HttpStatus.CONFLICT, "INVALID_MARKET_STATE", "Market is ${m.status}")
+    }
+
+    private fun move(m: Market, to: String) {
+        registry.counter("market.transitions", "from", m.status, "to", to).increment()
+        m.status = to
     }
 
     private fun change(m: Market, eventType: String): MarketV1 {

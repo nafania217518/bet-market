@@ -622,7 +622,7 @@ POST   /api/markets/{id}/resolve (ADMIN) { winningSide }         -> 200   (ENDED
 DELETE /api/markets/{id}        (ADMIN)                          -> 204   (cancels + refunds; not RESOLVED)
 
 GET    /actuator/prometheus                                      -> 200
-GET    /actuator/health                                          -> 200 (includes db-scheduler health)
+GET    /actuator/health                                          -> 200 (includes the `dbScheduler` component)
 ```
 
 ---
@@ -1168,29 +1168,43 @@ cache with the projection.
 
 ### Metrics per service (custom, via Micrometer)
 
-| Metric | Type | Labels |
-|---|---|---|
-| `bets_placed_total` | counter | `side`, `status` |
-| `bet_placement_duration_seconds` | histogram | — |
-| `wallet_reservations_total` | counter | `result` |
-| `wallet_balance_tokens` | gauge | `userId` (sampled) |
-| `markets_by_status` | gauge | `status` |
-| `market_transitions_total` | counter | `from`, `to` |
-| `settlement_duration_seconds` | histogram | — |
-| `payouts_total` | counter | — |
-| `kafka_consumer_lag` | gauge | `topic`, `group` |
-| `projection_events_processed_total` | counter | `eventType` |
-| `db_scheduler_executions_total` | counter | `taskName`, `result` |
-| `db_scheduler_execution_duration_seconds` | histogram | `taskName` |
-| `db_scheduler_scheduled_tasks` | gauge | `taskName` |
+| Metric | Type | Labels | Service |
+|---|---|---|---|
+| `bets_placed_total` | counter | `side`, `status` (`ACCEPTED` or the error code; replays not counted) | bet |
+| `bet_placement_duration_seconds` | histogram | — | bet |
+| `wallet_reservations_total` | counter | `result` (`reserved`, `replay` or the error code) | wallet |
+| `wallet_balance_mismatch` | gauge | — (wallets whose balance ≠ ledger CREDIT − DEBIT) | wallet |
+| `markets_by_status` | gauge | `status` | market |
+| `market_transitions_total` | counter | `from`, `to` | market |
+| `settlement_duration_seconds` | histogram | — | settlement |
+| `payouts_total` | counter | `type` (`WIN`, `REFUND`; counted after commit) | settlement |
+| `projection_events_processed_total` | counter | `event_type` | projection |
+| `dbscheduler_task_completions_total` | counter | `task`, `result` (`ok`, `failed`) | market, settlement (built into db-scheduler) |
+| `dbscheduler_task_duration_seconds` | histogram | `task` | market, settlement (built into db-scheduler) |
+| `kafka_consumergroup_lag` | gauge | `consumergroup`, `topic`, `partition` | kafka-exporter |
 
-Standard auto-instrumented metrics (`http_server_requests_seconds`, `hikaricp_connections`,
-`lettuce_command_completion`, `spring_kafka_listener_seconds`) cover the rest.
+Standard auto-instrumented metrics (`http_server_requests_seconds` with histogram buckets,
+`jvm_*`, `hikaricp_connections`, `lettuce_command_completion`, `spring_kafka_listener_seconds`)
+cover the rest. Prometheus adds the label `application` per target (`infra/prometheus/prometheus.yml`).
+
+**Implementation notes (M8)**
+
+- Every service exposes `/actuator/health` and `/actuator/prometheus`. The gateway allows
+  `/actuator/prometheus` without a token; nginx and the ingress route only `/api` and `/ws`.
+- Prometheus (`:9090`) scrapes every 5 s. Alerts show in its UI; there is no Alertmanager yet.
+- Grafana (`:3000`) provisions the Prometheus datasource and the dashboards from `infra/grafana/`.
+  Anonymous users get the Viewer role (local dev only).
+- Not built: `wallet_balance_tokens` per user (unbounded label values), a scheduled-task backlog
+  gauge, and dashboards 3–6 below. Add them when a question needs them.
+- `market_transitions_total` counts inside the transaction, so a rolled-back change still counts.
+  Rollbacks after a status change are rare (outbox insert failure).
+- Events emitted by db-scheduler tasks get a fresh correlation id in MDC for the task run.
 
 ### Grafana dashboards
 
-1. **Platform overview** — request rate, error rate, p95 latency per service, JVM heap, pod up/down.
-2. **Betting funnel** — bets placed/sec, rejection reasons, reservation success rate, saga failures.
+1. **Platform overview** (built) — request rate, 5xx rate, p95 latency per service, JVM heap, targets up/down.
+2. **Betting funnel** (built) — bets placed/sec by status, rejection reasons, reservation results,
+   placement p95/p99, markets by status, payouts/sec, wallet balance mismatch.
 3. **Market lifecycle** — markets by status, freeze/end lag (scheduled vs actual), settlement duration.
 4. **Scheduler health** — db-scheduler executions per task, failures, scheduled task backlog.
 5. **Kafka health** — consumer lag per group, producer throughput, DLT depth.
@@ -1203,13 +1217,17 @@ Standard auto-instrumented metrics (`http_server_requests_seconds`, `hikaricp_co
 - bet_placement_duration_seconds p99 > 1s for 5m   -> warning
 - any *.DLT topic non-empty                        -> critical
 - wallet_balance_mismatch > 0                      -> critical
-- db_scheduler_executions_total{result="failed"} > 0 for 5m  -> warning
-- service /actuator/health DOWN for 1m             -> critical
+- increase(dbscheduler_task_completions_total{result="failed"}[5m]) > 0 for 5m  -> warning
+- target down (up == 0) for 1m                     -> critical
 ```
+
+The rules live in `infra/prometheus/alerts.yml`. `alerts.test.yml` holds promtool unit tests
+(one firing and one quiet case per alert); `scripts/smoke.sh` runs them.
 
 ### Logging and tracing
 
-- Structured JSON logs via `logstash-logback-encoder`.
+- Structured JSON logs via Boot's built-in `logging.structured.format.console=logstash` (set in
+  docker-compose; tests keep plain logs). MDC fields such as `correlationId` appear in the JSON.
 - `X-Correlation-Id` propagated through gateway, HTTP clients, Kafka headers, and MDC.
 - Micrometer Tracing with OTLP exporter is a stretch goal (add Tempo + Grafana to the compose file).
 - Schema Registry with compatibility checks is also a stretch goal; until then events are plain JSON.

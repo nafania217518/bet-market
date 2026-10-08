@@ -8,11 +8,15 @@
 # M5: second user bets the other side; admin resolves after endAt; settlement pays the winner.
 # M6: the read side (Query Service via the gateway) shows the market, the bets and the leaderboard.
 # M7: nginx serves the SPA and proxies /api and /ws; a bet pushes live updates over STOMP (needs Node >= 22).
+# M8: Prometheus scrapes every service and exporter, alert rules pass their unit tests, the custom
+#     metrics reflect this run, Grafana has its dashboards, and services log JSON.
 # The Kafka check uses `docker compose exec`: Kafka has no route through the gateway.
 set -euo pipefail
 
 API="${API:-http://localhost:8080}"
 WEB="${WEB:-http://localhost}"
+PROM="${PROM:-http://localhost:9090}"
+GRAFANA="${GRAFANA:-http://localhost:3000}"
 STARTING_TOKENS="${STARTING_TOKENS:-1000}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-admin@bet-market.local}"
 ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin-password}"
@@ -222,5 +226,43 @@ LIVE_ID=$(curl -fs -X POST "$API/api/markets" -H "Authorization: Bearer $ADMIN_T
 node "$(dirname "$0")/ws-check.mjs" "$WEB" "$A_TOKEN" "$LIVE_ID" || fail "no live update over /ws"
 # Cancel it: the bet is refunded, so the next run starts clean.
 [ "$(status -X DELETE "$API/api/markets/$LIVE_ID" -H "Authorization: Bearer $ADMIN_TOKEN")" = 204 ] || fail "could not cancel the live market"
+
+# prom <PromQL>: prints the first sample value of an instant query, or nothing.
+prom() {
+  curl -fs --get "$PROM/api/v1/query" --data-urlencode "query=$1" \
+    | python3 -c 'import json,sys; r=json.load(sys.stdin)["data"]["result"]; print(r[0]["value"][1] if r else "")'
+}
+prom_positive() { local v; v=$(prom "$1"); [ -n "$v" ] && python3 -c "import sys; sys.exit(0 if float('$v') > 0 else 1)"; }
+all_targets_up() { [ "$(prom 'count(up == 0)')" = "" ] && [ "$(prom 'count(up)')" = 12 ]; }
+
+echo "22. Prometheus scrapes all 9 services and 3 exporters"
+eventually "a Prometheus target is down: $(prom 'count(up == 0)')" all_targets_up
+
+echo "23. alert rules load and pass their unit tests"
+"${COMPOSE[@]}" exec -T prometheus promtool check config /etc/prometheus/prometheus.yml > /dev/null || fail "promtool check config failed"
+"${COMPOSE[@]}" exec -T prometheus promtool test rules /etc/prometheus/alerts.test.yml > /dev/null || fail "alert rule tests failed"
+curl -fs "$PROM/api/v1/rules" | grep -q '"WalletBalanceMismatch"' || fail "alert rules are not loaded"
+
+echo "24. custom metrics reflect this run"
+eventually "bets_placed_total{status=ACCEPTED} is 0" prom_positive 'sum(bets_placed_total{status="ACCEPTED"})'
+eventually "no MARKET_NOT_OPEN rejection was counted" prom_positive 'sum(bets_placed_total{status="MARKET_NOT_OPEN"})'
+eventually "wallet_reservations_total{result=reserved} is 0" prom_positive 'sum(wallet_reservations_total{result="reserved"})'
+eventually "the freeze task never completed ok" prom_positive 'sum(dbscheduler_task_completions_total{task="freeze-market",result="ok"})'
+eventually "no market reached RESOLVED" prom_positive 'sum(market_transitions_total{to="RESOLVED"})'
+eventually "no settlement was timed" prom_positive 'sum(settlement_duration_seconds_count)'
+eventually "no WIN payout was counted" prom_positive 'sum(payouts_total{type="WIN"})'
+eventually "the projection processed no events" prom_positive 'sum(projection_events_processed_total)'
+eventually "no Kafka consumer group lag series" prom_positive 'count(kafka_consumergroup_lag)'
+[ "$(prom 'wallet_balance_mismatch')" = 0 ] || fail "wallet_balance_mismatch is $(prom 'wallet_balance_mismatch'), expected 0"
+
+echo "25. Grafana serves the provisioned dashboards"
+for uid in platform-overview betting-funnel; do
+  eventually "Grafana has no dashboard $uid" curl -fs "$GRAFANA/api/dashboards/uid/$uid"
+done
+
+echo "26. services log JSON"
+for svc in bet-service projection-service api-gateway; do
+  "${COMPOSE[@]}" logs --no-log-prefix --tail 1 "$svc" | grep -q '^{"@timestamp"' || fail "$svc does not log JSON"
+done
 
 echo "OK: user $USER_ID has $BALANCE tokens; gateway auth works; market $MARKET_ID took bets, froze on schedule and paid $PAYOUT to the winner"

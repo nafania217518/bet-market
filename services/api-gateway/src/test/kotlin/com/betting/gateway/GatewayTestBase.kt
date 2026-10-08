@@ -10,6 +10,7 @@ import com.nimbusds.jwt.JWTClaimsSet
 import com.nimbusds.jwt.SignedJWT
 import com.sun.net.httpserver.HttpServer
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.micrometer.metrics.test.autoconfigure.AutoConfigureMetrics
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.webtestclient.autoconfigure.AutoConfigureWebTestClient
 import org.springframework.test.context.DynamicPropertyRegistry
@@ -25,6 +26,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @AutoConfigureWebTestClient
+@AutoConfigureMetrics
 abstract class GatewayTestBase {
     @Autowired
     lateinit var client: WebTestClient

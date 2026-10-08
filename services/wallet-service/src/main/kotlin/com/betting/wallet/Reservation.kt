@@ -9,6 +9,7 @@ import com.betting.events.EventTypes
 import com.betting.events.PayoutCalculatedV1
 import com.betting.events.PayoutV1
 import com.betting.events.WalletMovementV1
+import io.micrometer.core.instrument.MeterRegistry
 import jakarta.persistence.Entity
 import jakarta.persistence.Id
 import jakarta.persistence.Table
@@ -52,9 +53,21 @@ class WalletMoves(
     private val reservations: ReservationRepository,
     private val ledger: LedgerEntryRepository,
     private val outbox: OutboxWriter,
+    private val meters: MeterRegistry,
 ) {
     /** Returns true when a new reservation is created, false for an identical retry. */
     fun reserve(userId: UUID, betId: UUID, amount: Long): Boolean {
+        val created = try {
+            doReserve(userId, betId, amount)
+        } catch (e: ApiException) {
+            meters.counter("wallet.reservations", "result", e.code).increment()
+            throw e
+        }
+        meters.counter("wallet.reservations", "result", if (created) "reserved" else "replay").increment()
+        return created
+    }
+
+    private fun doReserve(userId: UUID, betId: UUID, amount: Long): Boolean {
         if (amount < 1) throw ApiException(HttpStatus.BAD_REQUEST, "VALIDATION_ERROR", "amount must be at least 1")
         val w = wallets.lockById(userId) ?: throw ApiException(HttpStatus.NOT_FOUND, "WALLET_NOT_FOUND", "Wallet not found")
         reservations.findById(betId).orElse(null)?.let {

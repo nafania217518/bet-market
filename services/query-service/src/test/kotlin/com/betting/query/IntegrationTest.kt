@@ -3,6 +3,7 @@ package com.betting.query
 import org.bson.Document
 import org.junit.jupiter.api.BeforeEach
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.micrometer.metrics.test.autoconfigure.AutoConfigureMetrics
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.context.TestConfiguration
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection
@@ -31,6 +32,7 @@ class Containers {
 
 @SpringBootTest
 @AutoConfigureMockMvc
+@AutoConfigureMetrics
 @Import(Containers::class)
 abstract class IntegrationTest {
     @Autowired lateinit var mvc: MockMvc

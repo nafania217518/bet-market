@@ -1,6 +1,7 @@
 package com.betting.user
 
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.micrometer.metrics.test.autoconfigure.AutoConfigureMetrics
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.boot.test.context.TestConfiguration
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection
@@ -27,6 +28,7 @@ class Containers {
 // Same config in every subclass -> Spring caches one context, containers start once.
 @SpringBootTest(properties = ["outbox.poll-interval-ms=200"])
 @AutoConfigureMockMvc
+@AutoConfigureMetrics
 @Import(Containers::class)
 abstract class IntegrationTest {
     @Autowired lateinit var mvc: MockMvc

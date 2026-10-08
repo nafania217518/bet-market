@@ -99,7 +99,6 @@ resilience4j:
       default:
         timeout-duration: ${DOWNSTREAM_TIMEOUT:5s}
 management:
-  endpoints:
-    web:
-      exposure:
-        include: health
+  endpoints.web.exposure.include: health,prometheus
+  # Histogram buckets let Grafana and alerts compute p95/p99 latency.
+  metrics.distribution.percentiles-histogram.http.server.requests: true

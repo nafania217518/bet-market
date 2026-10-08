@@ -33,6 +33,8 @@ class SecurityConfig {
             .authorizeExchange {
                 it.pathMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                     .pathMatchers("/actuator/health/**", "/actuator/health").permitAll()
+                    // nginx and the future ingress expose only /api and /ws, so metrics stay internal.
+                    .pathMatchers("/actuator/prometheus").permitAll()
                     .pathMatchers(HttpMethod.POST, "/api/auth/**").permitAll()
                     // The browser cannot send Authorization on the WebSocket upgrade; Notification Service checks the JWT in the STOMP CONNECT frame.
                     .pathMatchers("/ws", "/ws/**").permitAll()

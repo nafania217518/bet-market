@@ -20,3 +20,6 @@
 - Spring Boot 4 reads MongoDB settings from `spring.mongodb.*`; the old `spring.data.mongodb.*` is silently ignored : docs/caveats/spring-boot-4.md
 - db-scheduler on Spring Boot 4 needs `db-scheduler-spring-boot-4-starter` (16.12.0); the old starter is Boot 3 only : docs/caveats/db-scheduler.md
 - Frontend needs Node 24 LTS or 26 (local nvm default is 26.11.1); Vitest 5 and jsdom 30 reject Node 23 : docs/caveats/frontend-toolchain.md
+- Boot 4 removed `@AutoConfigureObservability`; tests that read `/actuator/prometheus` need `@AutoConfigureMetrics` from `spring-boot-micrometer-metrics-test` : docs/caveats/spring-boot-4.md
+- JSON logs need no logstash encoder: Boot's `logging.structured.format.console=logstash` is built in : docs/caveats/spring-boot-4.md
+- db-scheduler 16.12 exports `dbscheduler_task_*` metrics itself; its health key is `dbScheduler` : docs/caveats/spring-boot-4.md
