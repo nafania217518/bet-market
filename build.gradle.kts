@@ -53,8 +53,8 @@ subprojects {
     tasks.named("check") { dependsOn("jacocoTestCoverageVerification") }
 }
 
-// Services: runnable Spring Boot apps with JPA, Flyway, Kafka, Testcontainers.
-configure(subprojects.filter { it.path.startsWith(":services:") }) {
+// Services: runnable Spring Boot apps with JPA, Flyway, Kafka, Testcontainers. The gateway is WebFlux and has its own build.
+configure(subprojects.filter { it.path.startsWith(":services:") && it.name != "api-gateway" }) {
     apply(plugin = "org.springframework.boot")
     apply(plugin = "org.jetbrains.kotlin.plugin.jpa")
 

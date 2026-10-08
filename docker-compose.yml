@@ -72,9 +72,27 @@ services:
       retries: 20
 
   # ---------- backend ----------
+  # Only the gateway publishes a host port. Services are reachable inside the compose network.
+  api-gateway:
+    build: { context: ., args: { SERVICE: api-gateway } }
+    ports: ["8080:8080"]
+    environment:
+      REDIS_HOST: redis
+      USER_SERVICE_URL: http://user-service:8081
+      WALLET_SERVICE_URL: http://wallet-service:8082
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/actuator/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+    depends_on:
+      redis: { condition: service_healthy }
+      user-service: { condition: service_healthy }
+      wallet-service: { condition: service_healthy }
+
   user-service:
     build: { context: ., args: { SERVICE: user-service } }
-    ports: ["8081:8081"]
     environment:
       <<: *service-env
       DB_URL: jdbc:postgresql://postgres:5432/user_db
@@ -90,7 +108,6 @@ services:
 
   wallet-service:
     build: { context: ., args: { SERVICE: wallet-service } }
-    ports: ["8082:8082"]
     environment:
       <<: *service-env
       DB_URL: jdbc:postgresql://postgres:5432/wallet_db

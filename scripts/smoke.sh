@@ -1,49 +1,71 @@
 #!/usr/bin/env bash
-# End-to-end smoke check. Run after `docker compose up -d`. Grows every milestone.
+# End-to-end smoke check. Run after `docker compose up -d --wait`. Grows every milestone.
+# Talks only to the API gateway.
 # M1: register -> login -> wallet shows the starting balance.
+# M2: gateway auth (JWT), identity headers, correlation id, seeded admin.
 set -euo pipefail
 
-USER_URL="${USER_URL:-http://localhost:8081}"
-WALLET_URL="${WALLET_URL:-http://localhost:8082}"
+API="${API:-http://localhost:8080}"
 STARTING_TOKENS="${STARTING_TOKENS:-1000}"
+ADMIN_EMAIL="${ADMIN_EMAIL:-admin@bet-market.local}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-admin-password}"
+ADMIN_ID="00000000-0000-0000-0000-000000000001"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
+json_field() { sed -n "s/.*\"$1\":\"\{0,1\}\([^\",}]*\).*/\1/p"; }
+status() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 
-# Wait until a URL answers 200 (services start after infra).
-wait_up() {
-  for _ in $(seq 1 60); do
-    curl -fs "$1" > /dev/null && return 0
-    sleep 2
-  done
-  fail "$1 is not up"
+# Print the JSON payload of a JWT (base64url, unpadded).
+jwt_payload() {
+  local p
+  p=$(cut -d. -f2 <<< "$1" | tr '_-' '/+')
+  while (( ${#p} % 4 )); do p="$p="; done
+  base64 -d <<< "$p"
 }
 
-json_field() { sed -n "s/.*\"$1\":\"\{0,1\}\([^\",}]*\).*/\1/p"; }
-
-wait_up "$USER_URL/actuator/health"
-wait_up "$WALLET_URL/actuator/health"
+for _ in $(seq 1 60); do curl -fs "$API/actuator/health" > /dev/null && break; sleep 2; done
+curl -fs "$API/actuator/health" > /dev/null || fail "gateway is not up"
 
 EMAIL="smoke-$(date +%s)-$RANDOM@example.com"
 PASSWORD="smoke-password-1"
 
 echo "1. register $EMAIL"
-USER_ID=$(curl -fs -X POST "$USER_URL/api/auth/register" -H 'Content-Type: application/json' \
+USER_ID=$(curl -fs -X POST "$API/api/auth/register" -H 'Content-Type: application/json' \
   -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\",\"displayName\":\"Smoke\"}" | json_field userId)
 [ -n "$USER_ID" ] || fail "register returned no userId"
 
 echo "2. login"
-TOKEN=$(curl -fs -X POST "$USER_URL/api/auth/login" -H 'Content-Type: application/json' \
+TOKEN=$(curl -fs -X POST "$API/api/auth/login" -H 'Content-Type: application/json' \
   -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" | json_field accessToken)
 [ -n "$TOKEN" ] || fail "login returned no accessToken"
-curl -fs "$USER_URL/.well-known/jwks.json" | grep -q '"kty":"RSA"' || fail "JWKS has no RSA key"
 
-# M1 has no gateway yet: X-User-Id stands in for the header the gateway injects in M2.
-echo "3. wallet (async via user.registered)"
+echo "3. wallet needs a token"
+[ "$(status "$API/api/wallets/me")" = 401 ] || fail "wallet without token is not 401"
+[ "$(status "$API/api/wallets/me" -H "X-User-Id: $USER_ID")" = 401 ] || fail "X-User-Id alone must not authenticate"
+
+echo "4. wallet (async via user.registered)"
+BALANCE=""
 for _ in $(seq 1 30); do
-  BALANCE=$(curl -fs "$WALLET_URL/api/wallets/me" -H "X-User-Id: $USER_ID" | json_field balance || true)
-  [ -n "${BALANCE:-}" ] && break
+  BALANCE=$(curl -fs "$API/api/wallets/me" -H "Authorization: Bearer $TOKEN" | json_field balance || true)
+  [ -n "$BALANCE" ] && break
   sleep 1
 done
-[ "${BALANCE:-}" = "$STARTING_TOKENS" ] || fail "balance is '${BALANCE:-none}', expected $STARTING_TOKENS"
+[ "$BALANCE" = "$STARTING_TOKENS" ] || fail "balance is '${BALANCE:-none}', expected $STARTING_TOKENS"
 
-echo "OK: user $USER_ID has $BALANCE tokens"
+echo "5. gateway overrides a spoofed X-User-Id"
+# The admin has no wallet: if the spoofed id reached the wallet service, this would be 404.
+WALLET_USER=$(curl -fs "$API/api/wallets/me" -H "Authorization: Bearer $TOKEN" -H "X-User-Id: $ADMIN_ID" | json_field userId)
+[ "$WALLET_USER" = "$USER_ID" ] || fail "spoofed X-User-Id reached the wallet service ($WALLET_USER)"
+
+echo "6. correlation id is echoed"
+CID="smoke-$RANDOM"
+curl -fs -D - -o /dev/null "$API/api/wallets/me" -H "Authorization: Bearer $TOKEN" -H "X-Correlation-Id: $CID" \
+  | grep -qi "^X-Correlation-Id: $CID" || fail "X-Correlation-Id not echoed"
+
+echo "7. seeded admin has the ADMIN role"
+ADMIN_TOKEN=$(curl -fs -X POST "$API/api/auth/login" -H 'Content-Type: application/json' \
+  -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}" | json_field accessToken)
+[ -n "$ADMIN_TOKEN" ] || fail "admin login failed"
+jwt_payload "$ADMIN_TOKEN" | grep -q '"ADMIN"' || fail "admin token has no ADMIN role"
+
+echo "OK: user $USER_ID has $BALANCE tokens; gateway auth works"

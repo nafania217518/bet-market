@@ -65,12 +65,24 @@ Decisions and deferrals:
 - `GET /api/wallets/me` reads `X-User-Id` (no auth until the M2 gateway).
 - Wallet semantics: `available = balance - reserved`; reserve does not change `balance`.
 
-## M2 — Gateway + auth (1 day)
+## M2 — Gateway + auth (1 day) — ✅ done
 - Spring Cloud Gateway: routing table from §8.1, JWT via JWKS, injects `X-User-Id`/`X-User-Roles`,
   correlation id, CORS, Redis rate limiter (built-in `RequestRateLimiter`, no custom code).
 - Seed an ADMIN user via Flyway for market creation.
 
 Done when: smoke script goes only through `:8080`.
+
+**Outcome (2026-10-08):** smoke runs only through `:8080`; user/wallet ports are closed on the host.
+Gateway: 13 tests, 98% coverage. Live check: 40 requests pass (burst), the rest get 429.
+Decisions and deferrals:
+- Spring Cloud 2025.1.3 (Gateway 5.0.3); it supports Boot 4.1. Route prefix: `spring.cloud.gateway.server.webflux`.
+- Routes exist only for running services (auth, wallet). Each later milestone adds its rows of §8.1.
+- Security rules are already final: public `GET` reads, `ROLE_ADMIN` for market writes, the rest needs a JWT.
+- The gateway always strips client `X-User-Id`/`X-User-Roles` and sets them from the JWT.
+- Admin seed: repeatable Flyway `R__seed_admin.sql` (pgcrypto bcrypt), credentials from
+  `ADMIN_EMAIL`/`ADMIN_PASSWORD` (dev defaults). The admin has no wallet.
+- Deferred: JWT deny-list (needs logout), circuit breakers/retries (§8.1) — add with M4 when a slow
+  downstream exists to test against.
 
 ## M3 — Markets + db-scheduler (1–2 days)
 - Market Service: aggregate + state machine, admin CRUD, `scheduled_tasks` Flyway migration,

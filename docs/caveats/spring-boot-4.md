@@ -25,3 +25,19 @@ Checked 2026-10-08.
 4. Dan Vega, "Spring Boot End of Life: Every 3.x Branch Is Now Unsupported" (2026-07-14):
    https://www.danvega.dev/blog/spring-boot-end-of-life
 5. endoflife.ai, Spring Boot EOL dates: https://endoflife.ai/spring-boot
+
+# Spring Cloud for Boot 4.1
+
+Checked 2026-10-08.
+
+- Spring Cloud 2026.0 (the Boot 4.1 line) is only at 2026.0.0-M1. We do not use milestones.
+- Spring Cloud 2025.1.x (Oakwood) supports Boot 4.0.x and Boot 4.1.x from 2025.1.2. We use 2025.1.3
+  (Spring Cloud Gateway 5.0.3).
+- Gateway 5 uses the artifact `spring-cloud-starter-gateway-server-webflux`.
+
+Sources:
+1. https://spring.io/projects/spring-cloud (release train / Boot compatibility table)
+2. https://github.com/spring-cloud/spring-cloud-release/wiki/Supported-Versions
+3. Maven Central `spring-cloud-dependencies` metadata (latest GA 2025.1.3, 2026.0.0-M1):
+   https://repo1.maven.org/maven2/org/springframework/cloud/spring-cloud-dependencies/maven-metadata.xml
+4. `spring-cloud-dependencies` 2025.1.3 POM (`spring-cloud-gateway.version` 5.0.3)

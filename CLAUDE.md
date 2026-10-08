@@ -15,4 +15,4 @@
 11. You may have outdated information. Do research with `mcp-browser` and check at least 4 sources for each claim you make. Put anything worth noticing under the Caveats section below in the format `SHORT_DESCRIPTION : file_reference.md`.
 
 ## Caveats
-- Spring Boot 3.x is end-of-life; the project uses Spring Boot 4.1 (Jackson 3, modular starters, Testcontainers 2) : docs/caveats/spring-boot-4.md
+- Spring Boot 3.x is end-of-life; the project uses Spring Boot 4.1 (Jackson 3, modular starters, Testcontainers 2) with Spring Cloud 2025.1.3 : docs/caveats/spring-boot-4.md
