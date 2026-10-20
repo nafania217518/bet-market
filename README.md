@@ -123,7 +123,7 @@ Delete the cluster:
 k3d cluster delete bet-market
 ```
 
-Validate the manifest without a cluster (also runs in CI):
+Validate the manifest without a cluster:
 
 ```bash
 scripts/k8s-check.sh

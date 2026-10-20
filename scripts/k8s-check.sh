@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Static checks for kubernetes_manifest.yaml (CI and local, Docker only):
+# Static checks for kubernetes_manifest.yaml (Docker only):
 # 1. kubeconform validates every object against the Kubernetes schemas.
 # 2. The scripts embedded in ConfigMaps are byte-identical to the repo files they copy.
 # 3. HorizontalPodAutoscalers follow the rules below.

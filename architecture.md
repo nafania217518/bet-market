@@ -1414,7 +1414,7 @@ Namespace bet-market
 - Consumers that only read Kafka (projection, settlement) get no HPA: their work follows topic lag, not CPU.
 - Postgres runs with `max_connections=250`: DB pods at HPA max + 1 surge, x Hikari pool 10, + Debezium.
   `scripts/k8s-check.sh` fails when a change breaks this budget.
-- CI runs `scripts/k8s-check.sh`: kubeconform `-strict`, the ConfigMap byte check and the HPA rules.
+- `scripts/k8s-check.sh` runs kubeconform `-strict`, the ConfigMap byte check and the HPA rules.
 - Caveats (retired ingress-nginx, Kafka service links, HPA): `docs/caveats/kubernetes.md`.
 
 ---
