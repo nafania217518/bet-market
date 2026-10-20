@@ -32,6 +32,15 @@ kafka_exec() {
   if [ -n "$K8S_NAMESPACE" ]; then kubectl -n "$K8S_NAMESPACE" exec -i kafka-0 -- "$@"
   else "${COMPOSE[@]}" exec -T kafka "$@"; fi
 }
+# connect_exec / postgres_exec <command...>: the same for Debezium Connect and Postgres.
+connect_exec() {
+  if [ -n "$K8S_NAMESPACE" ]; then kubectl -n "$K8S_NAMESPACE" exec -i deployment/connect -- "$@"
+  else "${COMPOSE[@]}" exec -T connect "$@"; fi
+}
+postgres_exec() {
+  if [ -n "$K8S_NAMESPACE" ]; then kubectl -n "$K8S_NAMESPACE" exec -i postgres-0 -- "$@"
+  else "${COMPOSE[@]}" exec -T postgres "$@"; fi
+}
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 json_field() { sed -n "s/.*\"$1\":\"\{0,1\}\([^\",}]*\).*/\1/p"; }
@@ -260,6 +269,22 @@ LIVE_ID=$(curl -fs -X POST "$API/api/markets" -H "Authorization: Bearer $ADMIN_T
 node "$(dirname "$0")/ws-check.mjs" "$WEB" "$A_TOKEN" "$LIVE_ID" || fail "no live update over /ws"
 # Cancel it: the bet is refunded, so the next run starts clean.
 [ "$(status -X DELETE "$API/api/markets/$LIVE_ID" -H "Authorization: Bearer $ADMIN_TOKEN")" = 204 ] || fail "could not cancel the live market"
+
+echo "21b. every Debezium connector is RUNNING"
+for db in user_db wallet_db market_db bet_db settlement_db; do
+  # Two RUNNING states: the connector and its single task.
+  n=$(connect_exec curl -fs "http://localhost:8083/connectors/outbox-$db/status" | grep -o '"state":"RUNNING"' | wc -l || true)
+  [ "$n" -ge 2 ] || fail "connector outbox-$db is not RUNNING"
+done
+
+echo "21c. the poller is off: no outbox row is marked published"
+outbox_count() { postgres_exec psql -U postgres -d "$1" -tAc "SELECT count(*) FROM outbox_event $2"; }
+for db in user_db wallet_db market_db bet_db settlement_db; do
+  [ "$(outbox_count "$db" 'WHERE published_at IS NOT NULL')" = 0 ] || fail "$db has outbox rows marked published"
+done
+for db in market_db bet_db; do
+  [ "$(outbox_count "$db" '')" -gt 0 ] || fail "$db has no outbox rows"
+done
 
 if [ -n "$K8S_NAMESPACE" ]; then
   echo "22-26. skipped: the observability stack runs only in docker compose"

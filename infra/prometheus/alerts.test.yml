@@ -137,3 +137,47 @@ tests:
         values: '3x15'
     alert_rule_test:
       - {eval_time: 12m, alertname: SchedulerTaskFailing, exp_alerts: []}
+
+  - name: OutboxSlotInactive fires when a Debezium slot is inactive for 5 minutes
+    interval: 1m
+    input_series:
+      - series: 'pg_replication_slots_slot_is_active{slot_name="outbox_bet_db",slot_type="logical"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: OutboxSlotInactive
+        exp_alerts:
+          - exp_labels: {severity: critical, slot_name: outbox_bet_db, slot_type: logical}
+            exp_annotations: {summary: "Replication slot outbox_bet_db has no consumer: Debezium Connect is not reading the outbox"}
+
+  - name: OutboxSlotInactive stays quiet when slots are active
+    interval: 1m
+    input_series:
+      - series: 'pg_replication_slots_slot_is_active{slot_name="outbox_bet_db",slot_type="logical"}'
+        values: '1x10'
+    alert_rule_test:
+      - {eval_time: 6m, alertname: OutboxSlotInactive, exp_alerts: []}
+
+  - name: OutboxSlotLagHigh fires when a slot lags more than 64 MiB for 10 minutes
+    interval: 1m
+    input_series:
+      - series: 'pg_replication_slots_slot_current_wal_lsn{slot_name="outbox_bet_db",slot_type="logical"}'
+        values: '100000000x15'
+      - series: 'pg_replication_slots_slot_confirmed_flush_lsn{slot_name="outbox_bet_db",slot_type="logical"}'
+        values: '0x15'
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: OutboxSlotLagHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, slot_name: outbox_bet_db, slot_type: logical}
+            exp_annotations: {summary: "Replication slot outbox_bet_db lags 95.37MiB of WAL"}
+
+  - name: OutboxSlotLagHigh stays quiet when the slot keeps up
+    interval: 1m
+    input_series:
+      - series: 'pg_replication_slots_slot_current_wal_lsn{slot_name="outbox_bet_db",slot_type="logical"}'
+        values: '100000000x15'
+      - series: 'pg_replication_slots_slot_confirmed_flush_lsn{slot_name="outbox_bet_db",slot_type="logical"}'
+        values: '99000000x15'
+    alert_rule_test:
+      - {eval_time: 11m, alertname: OutboxSlotLagHigh, exp_alerts: []}

@@ -9,6 +9,7 @@ import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.transaction.annotation.Propagation
 import org.springframework.transaction.annotation.Transactional
 import org.springframework.transaction.support.TransactionTemplate
+import java.time.Duration
 import java.time.Instant
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -27,8 +28,8 @@ class OutboxWriter(private val jdbc: JdbcClient, private val producer: String) {
             producer = producer,
             payload = EventJson.toNode(payload),
         )
-        jdbc.sql("INSERT INTO outbox_event(id, aggregate_id, event_type, payload) VALUES (?, ?, ?, ?::jsonb)")
-            .params(envelope.eventId, aggregateId, eventType, EventJson.write(envelope))
+        jdbc.sql("INSERT INTO outbox_event(id, aggregate_id, event_type, payload, correlation_id) VALUES (?, ?, ?, ?::jsonb, ?)")
+            .params(listOf(envelope.eventId, aggregateId, eventType, EventJson.write(envelope), envelope.correlationId))
             .update()
         return envelope.eventId
     }
@@ -56,6 +57,17 @@ class OutboxPoller(
             jdbc.sql("UPDATE outbox_event SET published_at = now() WHERE id = ?").param(row.id).update()
         }
         rows.size
+    }
+}
+
+// Debezium never marks rows published, so in that mode age alone decides. Safe on every replica: the delete is idempotent.
+class OutboxPurger(private val jdbc: JdbcClient, private val relay: String, private val retention: Duration) {
+    @Scheduled(fixedDelayString = "\${outbox.purge-interval-ms:3600000}")
+    fun purge(): Int {
+        val onlyPublished = if (relay == "poller") " AND published_at IS NOT NULL" else ""
+        return jdbc.sql("DELETE FROM outbox_event WHERE created_at < now() - ? * interval '1 second'$onlyPublished")
+            .param(retention.seconds)
+            .update()
     }
 }
 

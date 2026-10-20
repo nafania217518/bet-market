@@ -44,3 +44,20 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: "db-scheduler task {{ $labels.task }} is failing"
+
+      - alert: OutboxSlotInactive
+        expr: pg_replication_slots_slot_is_active{slot_name=~"outbox_.*"} == 0
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "Replication slot {{ $labels.slot_name }} has no consumer: Debezium Connect is not reading the outbox"
+
+      # Lag = current WAL LSN - the LSN Debezium confirmed. 64 MiB.
+      - alert: OutboxSlotLagHigh
+        expr: |
+          pg_replication_slots_slot_current_wal_lsn{slot_name=~"outbox_.*"}
+          - pg_replication_slots_slot_confirmed_flush_lsn{slot_name=~"outbox_.*"} > 67108864
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Replication slot {{ $labels.slot_name }} lags {{ $value | humanize1024 }}B of WAL"

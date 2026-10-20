@@ -5,15 +5,19 @@ x-service-env: &service-env
   LOGGING_STRUCTURED_FORMAT_CONSOLE: logstash
   DB_USER: app
   DB_PASSWORD: app
+  # Debezium Connect relays the outbox; the in-service poller is off.
+  OUTBOX_RELAY: debezium
 
 services:
   # ---------- infrastructure ----------
   postgres:
     image: postgres:16-alpine
+    # Debezium reads the outbox through logical replication.
+    command: ["postgres", "-c", "wal_level=logical"]
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-    ports: ["5432:5432"]
+    ports: ["${PG_PORT:-5432}:5432"]  # PG_PORT=55432 when another Postgres holds 5432
     volumes:
       - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
@@ -52,6 +56,34 @@ services:
     volumes:
       - ./infra/kafka/create-topics.sh:/create-topics.sh:ro
     entrypoint: ["sh", "/create-topics.sh"]
+    restart: "no"
+
+  # Debezium Connect: streams each database's outbox_event table to Kafka (the outbox relay).
+  connect:
+    image: quay.io/debezium/connect:3.7.0.Final
+    environment:
+      BOOTSTRAP_SERVERS: kafka:29092
+      GROUP_ID: connect
+      CONFIG_STORAGE_TOPIC: connect_configs
+      OFFSET_STORAGE_TOPIC: connect_offsets
+      STATUS_STORAGE_TOPIC: connect_statuses
+      HEAP_OPTS: -Xms256m -Xmx512m
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8083/connectors"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    depends_on:
+      kafka-init: { condition: service_completed_successfully }
+      postgres: { condition: service_healthy }
+
+  connect-init:
+    image: quay.io/debezium/connect:3.7.0.Final
+    depends_on:
+      connect: { condition: service_healthy }
+    volumes:
+      - ./infra/debezium:/debezium:ro
+    entrypoint: ["sh", "/debezium/register.sh"]
     restart: "no"
 
   redis:
@@ -115,6 +147,8 @@ services:
     depends_on: &backend-deps
       postgres: { condition: service_healthy }
       kafka-init: { condition: service_completed_successfully }
+      # Also makes `up --wait` accept the one-shot's exit.
+      connect-init: { condition: service_completed_successfully }
 
   wallet-service:
     build: { context: ., args: { SERVICE: wallet-service } }

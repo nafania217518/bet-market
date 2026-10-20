@@ -2,10 +2,12 @@ package com.betting.common
 
 import org.apache.kafka.common.TopicPartition
 import org.springframework.beans.factory.annotation.Value
+import org.springframework.boot.convert.DurationStyle
 import org.springframework.boot.restclient.RestClientCustomizer
 import org.springframework.boot.autoconfigure.AutoConfiguration
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication
 import org.springframework.context.annotation.Import
 import org.springframework.context.annotation.Bean
@@ -39,8 +41,16 @@ class CommonAutoConfiguration {
             OutboxWriter(JdbcClient.create(dataSource), producer)
 
         @Bean
+        @ConditionalOnProperty(name = ["outbox.relay"], havingValue = "poller", matchIfMissing = true)
         fun outboxPoller(dataSource: DataSource, kafka: KafkaTemplate<String, String>, txManager: PlatformTransactionManager) =
             OutboxPoller(JdbcClient.create(dataSource), kafka, TransactionTemplate(txManager))
+
+        @Bean
+        fun outboxPurger(
+            dataSource: DataSource,
+            @Value("\${outbox.relay:poller}") relay: String,
+            @Value("\${outbox.retention:7d}") retention: String,
+        ) = OutboxPurger(JdbcClient.create(dataSource), relay, DurationStyle.detectAndParse(retention))
 
         @Bean
         fun idempotentConsumer(dataSource: DataSource) = IdempotentConsumer(JdbcClient.create(dataSource))

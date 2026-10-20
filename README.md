@@ -29,6 +29,7 @@ Options 1 and 3 can run at the same time. They use different ports and separate 
 | k3d 5.9+ and kubectl | option 3 |
 
 Docker builds the services itself, so options 1–3 do not need a local JDK.
+If another Postgres holds port 5432, start with `PG_PORT=55432 docker compose up -d --build --wait`.
 Node 23 does not work: Vitest 5 and jsdom 30 reject it (see [the caveat](docs/caveats/frontend-toolchain.md)).
 
 ### Option 1: full stack with Docker Compose
@@ -46,7 +47,10 @@ The first build takes several minutes. `--wait` returns when every container is 
 | http://localhost:3000 | Grafana: opens on "Platform overview"; "Betting funnel" is under Dashboards (no login) |
 | http://localhost:9090 | Prometheus: targets, queries, alerts |
 
-Infrastructure ports on the host: Postgres 5432, Kafka 9092, Redis 6379, MongoDB 27017.
+Infrastructure ports on the host: Postgres 5432 (`PG_PORT`), Kafka 9092, Redis 6379, MongoDB 27017.
+Debezium (Kafka Connect) sends the outbox events to Kafka. Check it with
+`docker compose exec connect curl -s localhost:8083/connectors?expand=status`.
+Upgrading from a stack without Debezium? Run `docker compose down -v` once: Postgres creates the replication slots only on an empty volume.
 
 Log in as the seeded admin: `admin@bet-market.local` / `admin-password` (local dev values).
 Or register a new user on the Log in page. Every new user gets 1000 tokens.
@@ -107,7 +111,7 @@ The script runs these steps:
 The first deploy shows a few pod restarts. Services start before Postgres and Kafka are ready.
 
 - Open http://localhost:8000.
-- Market Service runs 2 replicas.
+- HPAs scale api-gateway, wallet, bet and query (1–3 replicas) and market (2–4) on CPU. Watch them: `kubectl -n bet-market get hpa`.
 - Prometheus and Grafana run only in Docker Compose.
 - Load generator: `kubectl -n bet-market scale deployment/load-generator --replicas=1`.
 
@@ -145,7 +149,7 @@ Open http://localhost:5173. Changes reload at once.
 | `cd frontend && npm test` | SPA unit tests with coverage (Vitest) |
 | `scripts/smoke.sh` | End-to-end run against the running Docker Compose stack (26 steps) |
 | `scripts/rebuild-read-model.sh` | Drops the read model, replays Kafka, and proves the result is identical |
-| `scripts/k8s-check.sh` | kubeconform validation of the manifest, plus a byte check of its embedded scripts |
+| `scripts/k8s-check.sh` | kubeconform validation of the manifest, a byte check of its embedded scripts, and the HPA rules |
 
 Notes on `scripts/smoke.sh`:
 - Stop the load generator first. Bots bet on the smoke market and change its payout. The script refuses to run while they are active.

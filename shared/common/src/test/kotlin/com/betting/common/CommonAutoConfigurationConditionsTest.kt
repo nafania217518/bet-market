@@ -50,6 +50,27 @@ class CommonAutoConfigurationConditionsTest {
             }
     }
 
+    private fun outboxContext(vararg props: String) = ApplicationContextRunner().withConfiguration(config)
+        .withPropertyValues("spring.application.name=test", *props)
+        .withBean(DataSource::class.java, { mock(DataSource::class.java) })
+        .withBean(KafkaTemplate::class.java, { mock(KafkaTemplate::class.java) })
+        .withBean(PlatformTransactionManager::class.java, { mock(PlatformTransactionManager::class.java) })
+
+    @Test
+    fun `with outbox relay debezium the poller bean is not created`() {
+        outboxContext("outbox.relay=debezium").run { ctx ->
+            assertThat(ctx).hasNotFailed()
+            assertThat(ctx).doesNotHaveBean(OutboxPoller::class.java)
+            assertThat(ctx).hasSingleBean(OutboxPurger::class.java)
+        }
+    }
+
+    @Test
+    fun `the poller stays the default relay`() {
+        outboxContext().run { ctx -> assertThat(ctx).hasSingleBean(OutboxPoller::class.java) }
+        outboxContext("outbox.relay=poller").run { ctx -> assertThat(ctx).hasSingleBean(OutboxPoller::class.java) }
+    }
+
     @Test
     fun `with a DataSource and Kafka all common beans are created`() {
         WebApplicationContextRunner().withConfiguration(config)
@@ -60,7 +81,7 @@ class CommonAutoConfigurationConditionsTest {
             .run { ctx ->
                 assertThat(ctx).hasNotFailed()
                 listOf(
-                    OutboxWriter::class.java, OutboxPoller::class.java, IdempotentConsumer::class.java,
+                    OutboxWriter::class.java, OutboxPoller::class.java, OutboxPurger::class.java, IdempotentConsumer::class.java,
                     CorrelationIdRecordInterceptor::class.java, CommonErrorHandler::class.java,
                     CorrelationIdFilter::class.java, GlobalExceptionHandler::class.java, RestClientCustomizer::class.java,
                 ).forEach { assertThat(ctx).hasSingleBean(it) }

@@ -20,6 +20,8 @@ data:
   BET_SERVICE_URL: http://bet-service:8084
   QUERY_SERVICE_URL: http://query-service:8087
   NOTIFICATION_SERVICE_URL: ws://notification-service:8088
+  # Debezium Connect relays the outbox; the in-service poller is off. Only the 5 outbox producers read it.
+  OUTBOX_RELAY: debezium
 ---
 # Dev values only. Real clusters inject these from a secret store (e.g. External Secrets, Vault).
 apiVersion: v1
@@ -31,7 +33,7 @@ stringData:
   ADMIN_EMAIL: admin@bet-market.local
   ADMIN_PASSWORD: admin-password
 ---
-# Byte-for-byte copy of infra/postgres/init/01-databases.sql.
+# Byte-for-byte copies of infra/postgres/init/*.sql.
 apiVersion: v1
 kind: ConfigMap
 metadata: { name: postgres-init, namespace: bet-market }
@@ -47,6 +49,26 @@ data:
     CREATE DATABASE market_db OWNER app;
     CREATE DATABASE bet_db OWNER app;
     CREATE DATABASE settlement_db OWNER app;
+  02-debezium.sql: |
+    -- Debezium outbox relay (architecture.md §13.5). Needs wal_level=logical (container command).
+    -- Insert-only publication: UPDATE/DELETE on tables without a replica identity do not fail,
+    -- and outbox purge DELETEs are never streamed.
+    -- The slot is created here, before any service writes, so Connect starts from the first event.
+    \c user_db
+    CREATE PUBLICATION dbz_outbox FOR ALL TABLES WITH (publish = 'insert');
+    SELECT pg_create_logical_replication_slot('outbox_user_db', 'pgoutput');
+    \c wallet_db
+    CREATE PUBLICATION dbz_outbox FOR ALL TABLES WITH (publish = 'insert');
+    SELECT pg_create_logical_replication_slot('outbox_wallet_db', 'pgoutput');
+    \c market_db
+    CREATE PUBLICATION dbz_outbox FOR ALL TABLES WITH (publish = 'insert');
+    SELECT pg_create_logical_replication_slot('outbox_market_db', 'pgoutput');
+    \c bet_db
+    CREATE PUBLICATION dbz_outbox FOR ALL TABLES WITH (publish = 'insert');
+    SELECT pg_create_logical_replication_slot('outbox_bet_db', 'pgoutput');
+    \c settlement_db
+    CREATE PUBLICATION dbz_outbox FOR ALL TABLES WITH (publish = 'insert');
+    SELECT pg_create_logical_replication_slot('outbox_settlement_db', 'pgoutput');
 ---
 # Byte-for-byte copy of infra/kafka/create-topics.sh.
 apiVersion: v1
@@ -119,6 +141,9 @@ spec:
       containers:
         - name: postgres
           image: postgres:16-alpine
+          # The image entrypoint prepends `postgres` to args that start with `-`. Debezium needs logical WAL.
+          # max_connections: DB pods at HPA max replicas + 1 surge, x Hikari pool 10, + Debezium (k8s-check.sh).
+          args: ["-c", "wal_level=logical", "-c", "max_connections=250"]
           ports: [{ containerPort: 5432 }]
           env:
             - { name: POSTGRES_USER, value: postgres }
@@ -281,6 +306,131 @@ spec:
         - name: scripts
           configMap: { name: kafka-create-topics }
 ---
+# Byte-for-byte copies of infra/debezium/*.
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: debezium-connector, namespace: bet-market }
+data:
+  register.sh: |
+    #!/bin/sh
+    # Registers one outbox connector per database (PUT is idempotent) and waits until each runs.
+    # Needs only curl and sed; the Debezium Connect image has both.
+    set -eu
+    CONNECT_URL=${CONNECT_URL:-http://connect:8083}
+    DBS=${DBS:-"user_db wallet_db market_db bet_db settlement_db"}
+    TEMPLATE="$(dirname "$0")/outbox-connector.json"
+
+    i=0
+    until curl -fsS "$CONNECT_URL/connectors" > /dev/null 2>&1; do
+      i=$((i + 1)); [ "$i" -ge 60 ] && { echo "Connect REST at $CONNECT_URL did not answer in 120 s"; exit 1; }
+      sleep 2
+    done
+
+    for db in $DBS; do
+      sed "s/__DB__/$db/g" "$TEMPLATE" \
+        | curl -fsS -X PUT -H 'Content-Type: application/json' --data @- "$CONNECT_URL/connectors/outbox-$db/config" > /dev/null
+      echo "registered outbox-$db"
+    done
+
+    for db in $DBS; do
+      i=0
+      # Two RUNNING states: the connector and its single task.
+      until [ "$(curl -fsS "$CONNECT_URL/connectors/outbox-$db/status" 2>/dev/null | grep -o '"state":"RUNNING"' | wc -l)" -ge 2 ]; do
+        i=$((i + 1)); [ "$i" -ge 30 ] && { echo "outbox-$db not RUNNING after 60 s:"; curl -sS "$CONNECT_URL/connectors/outbox-$db/status"; echo; exit 1; }
+        sleep 2
+      done
+      echo "outbox-$db RUNNING"
+    done
+  outbox-connector.json: |
+    {
+      "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+      "plugin.name": "pgoutput",
+      "database.hostname": "postgres",
+      "database.port": "5432",
+      "database.user": "postgres",
+      "database.password": "postgres",
+      "database.dbname": "__DB__",
+      "topic.prefix": "__DB__",
+      "slot.name": "outbox___DB__",
+      "publication.name": "dbz_outbox",
+      "publication.autocreate.mode": "disabled",
+      "snapshot.mode": "no_data",
+      "table.include.list": "public.outbox_event",
+      "tombstones.on.delete": "false",
+      "key.converter": "org.apache.kafka.connect.storage.StringConverter",
+      "value.converter": "org.apache.kafka.connect.storage.StringConverter",
+      "heartbeat.interval.ms": "10000",
+      "heartbeat.action.query": "SELECT pg_logical_emit_message(false, 'heartbeat', now()::varchar)",
+      "topic.creation.default.replication.factor": "1",
+      "topic.creation.default.partitions": "1",
+      "predicates": "isOutbox",
+      "predicates.isOutbox.type": "org.apache.kafka.connect.transforms.predicates.TopicNameMatches",
+      "predicates.isOutbox.pattern": "__DB__\\.public\\.outbox_event",
+      "transforms": "outbox",
+      "transforms.outbox.type": "io.debezium.transforms.outbox.EventRouter",
+      "transforms.outbox.predicate": "isOutbox",
+      "transforms.outbox.table.field.event.key": "aggregate_id",
+      "transforms.outbox.route.by.field": "event_type",
+      "transforms.outbox.route.topic.replacement": "${routedByValue}",
+      "transforms.outbox.table.fields.additional.placement": "correlation_id:header:X-Correlation-Id"
+    }
+---
+# Debezium Connect: streams each database's outbox_event table to Kafka (the outbox relay).
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: connect, namespace: bet-market }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: connect } }
+  template:
+    metadata: { labels: { app: connect } }
+    spec:
+      # The image reads CONNECT_* env vars as worker config; service links would inject CONNECT_PORT etc.
+      enableServiceLinks: false
+      containers:
+        - name: connect
+          image: quay.io/debezium/connect:3.7.0.Final
+          ports: [{ containerPort: 8083 }]
+          env:
+            - { name: BOOTSTRAP_SERVERS, value: "kafka:29092" }
+            - { name: GROUP_ID, value: connect }
+            - { name: CONFIG_STORAGE_TOPIC, value: connect_configs }
+            - { name: OFFSET_STORAGE_TOPIC, value: connect_offsets }
+            - { name: STATUS_STORAGE_TOPIC, value: connect_statuses }
+            - { name: HEAP_OPTS, value: "-Xms256m -Xmx512m" }
+          resources:
+            requests: { cpu: 100m, memory: 512Mi }
+            limits: { memory: 1Gi }
+          readinessProbe:
+            httpGet: { path: /connectors, port: 8083 }
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata: { name: connect, namespace: bet-market }
+spec:
+  selector: { app: connect }
+  ports: [{ port: 8083 }]
+---
+# Registers one outbox connector per database. Retries until Connect is up; PUT is idempotent.
+apiVersion: batch/v1
+kind: Job
+metadata: { name: connect-init, namespace: bet-market }
+spec:
+  backoffLimit: 20
+  template:
+    spec:
+      restartPolicy: OnFailure
+      enableServiceLinks: false
+      containers:
+        - name: connect-init
+          image: quay.io/debezium/connect:3.7.0.Final
+          command: [sh, /debezium/register.sh]
+          volumeMounts: [{ name: debezium, mountPath: /debezium }]
+      volumes:
+        - name: debezium
+          configMap: { name: debezium-connector }
+---
 # 1 replica: the JWT signing key is generated per pod (see JwtIssuer.kt). Replicas would disagree.
 apiVersion: apps/v1
 kind: Deployment
@@ -329,7 +479,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata: { name: wallet-service, namespace: bet-market }
 spec:
-  replicas: 1
   selector: { matchLabels: { app: wallet-service } }
   template:
     metadata: { labels: { app: wallet-service } }
@@ -364,12 +513,22 @@ spec:
   selector: { app: wallet-service }
   ports: [{ port: 8082 }]
 ---
-# 2 replicas exercise db-scheduler's lock-and-fetch.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: wallet-service, namespace: bet-market }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: wallet-service }
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
+---
+# The HPA keeps at least 2 replicas to exercise db-scheduler's lock-and-fetch.
 apiVersion: apps/v1
 kind: Deployment
 metadata: { name: market-service, namespace: bet-market }
 spec:
-  replicas: 2
   selector: { matchLabels: { app: market-service } }
   template:
     metadata: { labels: { app: market-service } }
@@ -404,11 +563,21 @@ spec:
   selector: { app: market-service }
   ports: [{ port: 8083 }]
 ---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: market-service, namespace: bet-market }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: market-service }
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata: { name: bet-service, namespace: bet-market }
 spec:
-  replicas: 1
   selector: { matchLabels: { app: bet-service } }
   template:
     metadata: { labels: { app: bet-service } }
@@ -442,6 +611,17 @@ metadata: { name: bet-service, namespace: bet-market }
 spec:
   selector: { app: bet-service }
   ports: [{ port: 8084 }]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: bet-service, namespace: bet-market }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: bet-service }
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -520,7 +700,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata: { name: query-service, namespace: bet-market }
 spec:
-  replicas: 1
   selector: { matchLabels: { app: query-service } }
   template:
     metadata: { labels: { app: query-service } }
@@ -549,6 +728,17 @@ metadata: { name: query-service, namespace: bet-market }
 spec:
   selector: { app: query-service }
   ports: [{ port: 8087 }]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: query-service, namespace: bet-market }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: query-service }
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
 ---
 # 1 replica: in-memory STOMP broker.
 apiVersion: apps/v1
@@ -589,7 +779,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata: { name: api-gateway, namespace: bet-market }
 spec:
-  replicas: 1
   selector: { matchLabels: { app: api-gateway } }
   template:
     metadata: { labels: { app: api-gateway } }
@@ -618,6 +807,17 @@ metadata: { name: api-gateway, namespace: bet-market }
 spec:
   selector: { app: api-gateway }
   ports: [{ port: 8080 }]
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: api-gateway, namespace: bet-market }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: api-gateway }
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
 ---
 apiVersion: apps/v1
 kind: Deployment

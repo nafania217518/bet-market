@@ -20,6 +20,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 @SpringBootTest
@@ -56,6 +57,15 @@ class OutboxIntegrationTest {
         assertEquals("test-service", envelope.producer)
         assertEquals("agg-1", envelope.aggregateId)
         assertEquals("a@b.c", EventJson.payload(envelope, UserRegisteredV1::class).email)
+    }
+
+    private fun correlationColumn(id: UUID) =
+        jdbc.sql("SELECT correlation_id FROM outbox_event WHERE id = ?").param(id).query { rs, _ -> rs.getString(1) }.list().single()
+
+    @Test
+    fun `the writer stores the correlation id in its own column`() {
+        assertEquals("corr-col", correlationColumn(append("agg-c", "corr-col")))
+        assertNull(correlationColumn(append("agg-c", null)))
     }
 
     @Test

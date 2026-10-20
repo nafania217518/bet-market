@@ -167,6 +167,38 @@
           "legendFormat": "{{job}} {{instance}}"
         }
       ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Outbox slot lag",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "expr": "pg_replication_slots_slot_current_wal_lsn{slot_name=~\"outbox_.*\"} - pg_replication_slots_slot_confirmed_flush_lsn{slot_name=~\"outbox_.*\"}",
+          "legendFormat": "{{slot_name}}"
+        }
+      ]
     }
   ]
 }

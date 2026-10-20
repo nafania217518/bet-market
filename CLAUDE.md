@@ -25,3 +25,6 @@
 - db-scheduler 16.12 exports `dbscheduler_task_*` metrics itself; its health key is `dbScheduler` : docs/caveats/spring-boot-4.md
 - ingress-nginx is retired (March 2026); the manifest uses Traefik, which k3s/k3d ship : docs/caveats/kubernetes.md
 - Kafka pods need `enableServiceLinks: false`: the image reads every `KAFKA_*` env var as broker config : docs/caveats/kubernetes.md
+- HPA needs a CPU request and no `spec.replicas` on its Deployment; k3s ships metrics-server : docs/caveats/kubernetes.md
+- Debezium: publication is insert-only (no replica identity needed); slots are created at DB init and keep WAL while Connect is down : docs/caveats/debezium.md
+- Debezium Connect pods need `enableServiceLinks: false`: the image reads every `CONNECT_*` env var as worker config : docs/caveats/debezium.md

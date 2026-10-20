@@ -262,8 +262,25 @@ Decisions and deferrals:
 - Runs on demand: `docker compose --profile load up -d load-generator`. In Kubernetes, scale the
   Deployment from 0. Grafana's Betting funnel shows its actions and bot counts.
 
+## Extra (2026-10-10): HorizontalPodAutoscalers
+- `autoscaling/v2` HPAs on CPU (70% of the 100m request): api-gateway, wallet, bet and query scale
+  1–3 replicas; market scales 2–4, so db-scheduler still runs on 2+ pods.
+- No HPA for user-service (per-pod JWT key), notification-service (in-memory broker), load-generator
+  (on demand), or the Kafka-only consumers (their work follows topic lag, not CPU).
+- HPA-managed Deployments set no `spec.replicas`. `scripts/k8s-check.sh` checks the rules;
+  `scripts/k8s-up.sh` waits until metrics-server feeds every HPA.
+
+## Extra (2026-10-13): Debezium outbox relay
+- Kafka Connect with Debezium 3.7 reads `outbox_event` from the WAL: one Postgres connector per
+  database, Outbox Event Router SMT. Topics, keys, values and the correlation header stay the same.
+- `outbox.relay=debezium|poller`. Compose and Kubernetes use Debezium; service tests keep the poller.
+- Postgres init creates an insert-only publication and the slots, so no event is lost before Connect starts.
+- A purge job deletes outbox rows after 7 days. A heartbeat keeps quiet slots moving.
+- Tests: `DebeziumOutboxContractTest` (real containers, real config), smoke steps 21b and 21c,
+  slot alerts with promtool tests, k8s ConfigMap byte checks.
+
 ## M10 — Stretch
-Tracing (OTLP + Tempo), Schema Registry + compatibility checks, Debezium outbox, load test (k6) with
+Tracing (OTLP + Tempo), Schema Registry + compatibility checks, ~~Debezium outbox~~ (done, see above), load test (k6) with
 the freeze-time race, chaos (kill wallet mid-saga), wallet-integrity reconciliation job.
 
 ---

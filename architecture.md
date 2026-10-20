@@ -1034,20 +1034,34 @@ scheduled_tasks: (execution_time ASC, priority DESC)
 ### 11.1 Transactional Outbox
 
 Every command-side service writes its domain change and an `outbox_event` row in **one**
-PostgreSQL transaction. A poller (or Debezium, if you want to level up later) reads unpublished
-rows and produces them to Kafka, then marks them published.
+PostgreSQL transaction. A relay sends the rows to Kafka: topic = `event_type`, key = `aggregate_id`,
+value = the envelope JSON, header `X-Correlation-Id` (from the `correlation_id` column).
 
 ```text
 BEGIN
   INSERT INTO bet (...)
-  INSERT INTO outbox_event (aggregateId, type, payload, createdAt, publishedAt=NULL)
+  INSERT INTO outbox_event (id, aggregate_id, event_type, payload, correlation_id)
 COMMIT
-      |
+      |  WAL (wal_level=logical)
       v
-  @Scheduled poller -> SELECT ... WHERE publishedAt IS NULL FOR UPDATE SKIP LOCKED
-                    -> kafkaTemplate.send(...)
-                    -> UPDATE outbox_event SET publishedAt = now()
+  slot outbox_<db> -> Kafka Connect, Debezium Postgres connector (one per database)
+                   -> Outbox Event Router SMT -> Kafka
 ```
+
+- `outbox.relay` selects the relay. Compose and Kubernetes use `debezium`. The default, `poller`,
+  is the old `@Scheduled` poller (`SELECT ... FOR UPDATE SKIP LOCKED`, send, set `published_at`).
+  Service integration tests use it, so they need no Connect container.
+- `infra/postgres/init/02-debezium.sql` creates an insert-only publication `dbz_outbox` and the
+  slot `outbox_<db>` when the database is created. Events written before Connect starts are not lost.
+- `infra/debezium/register.sh` (`connect-init`) registers the 5 connectors from
+  `infra/debezium/outbox-connector.json` with an idempotent `PUT`.
+- A heartbeat (a logical message every 10 s) keeps the slot of a quiet database moving. All
+  databases share one WAL.
+- Delivery is at least once. Consumers skip duplicates (11.2).
+- Debezium never marks rows published. `OutboxPurger` deletes rows older than `outbox.retention`
+  (7 days) every hour. In poller mode it deletes only published rows.
+- `DebeziumOutboxContractTest` runs Postgres, Kafka and Connect with the real init SQL, connector
+  JSON and `register.sh`. Caveats: `docs/caveats/debezium.md`.
 
 This removes the classic "DB committed but Kafka publish failed" dual-write problem.
 
@@ -1252,6 +1266,8 @@ cover the rest. Prometheus adds the label `application` per target (`infra/prome
 - wallet_balance_mismatch > 0                      -> critical
 - increase(dbscheduler_task_completions_total{result="failed"}[5m]) > 0 for 5m  -> warning
 - target down (up == 0) for 1m                     -> critical
+- OutboxSlotInactive: outbox_* slot not active for 5m              -> critical
+- OutboxSlotLagHigh: slot current_wal_lsn - confirmed_flush_lsn > 64 MiB for 10m -> warning
 ```
 
 The rules live in `infra/prometheus/alerts.yml`. `alerts.test.yml` holds promtool unit tests
@@ -1285,11 +1301,12 @@ The rules live in `infra/prometheus/alerts.yml`. `alerts.test.yml` holds promtoo
 | query-service | 8087 |
 | notification-service | 8088 |
 | load-generator (on demand) | 8089 |
+| connect (Debezium, network only) | 8083 |
 | kafka-ui (optional) | 8090 |
 | mongo-express (optional) | 8091 |
 | kafka (host listener) | 9092 |
 | kafka (internal listener) | 29092 |
-| postgres | 5432 |
+| postgres | 5432 (`PG_PORT` changes the host port) |
 | mongodb | 27017 |
 | redis | 6379 |
 | prometheus | 9090 |
@@ -1301,7 +1318,7 @@ The rules live in `infra/prometheus/alerts.yml`. `alerts.test.yml` holds promtoo
 ### 13.2 Compose service groups
 
 ```text
-[ infrastructure ]   postgres, mongodb, redis, kafka, kafka-init
+[ infrastructure ]   postgres, mongodb, redis, kafka, kafka-init, connect, connect-init
 [ backend ]          gateway, user-svc, wallet-svc, market-svc, bet-svc,
                      settlement-svc, projection-svc, query-svc, notification-svc
 [ frontend ]         frontend
@@ -1315,7 +1332,10 @@ The rules live in `infra/prometheus/alerts.yml`. `alerts.test.yml` holds promtoo
 postgres, mongodb, redis, kafka  (healthchecks)
         |
         v
-kafka-init  (creates topics)
+kafka-init  (creates topics), postgres (creates the slots)
+        |
+        v
+connect -> connect-init  (registers the outbox connectors)
         |
         v
 user-svc, wallet-svc, market-svc, bet-svc, settlement-svc,
@@ -1356,9 +1376,12 @@ GRANT ALL PRIVILEGES ON DATABASE bet_db TO app;
 GRANT ALL PRIVILEGES ON DATABASE settlement_db TO app;
 ```
 
+`02-debezium.sql` then creates, in each database, the publication `dbz_outbox` and the slot
+`outbox_<db>` (11.1). Postgres runs with `wal_level=logical`.
+
 Each service runs its own Flyway migrations against its own database on startup. The
 `shared/common` jar ships `V1__common_outbox_and_processed_event.sql` (`outbox_event`,
-`processed_event`); service migrations start at `V2`. Market Service
+`processed_event`) and `V1_1__outbox_correlation_id.sql`; service migrations start at `V2`. Market Service
 and Settlement Service each run a Flyway migration that creates their own `scheduled_tasks`
 table (the DDL from section 10) in their respective databases.
 
@@ -1372,9 +1395,12 @@ Namespace bet-market
   ConfigMaps postgres-init, kafka-create-topics   byte copies of infra/ scripts (scripts/k8s-check.sh)
   StatefulSets + Services  postgres, kafka (KRaft, 1 node), redis, mongodb   1Gi PVC each
   Job kafka-init           runs create-topics.sh
+  Deployment connect       Debezium Kafka Connect (enableServiceLinks: false, like kafka)
+  Job connect-init         runs register.sh from ConfigMap debezium-connector (byte copies of infra/debezium)
   Deployments + Services   the 9 services and frontend, named like the compose hosts
-                           market-service: 2 replicas (db-scheduler lock-and-fetch)
                            user-service, notification-service: 1 replica (per-pod JWT key, in-memory broker)
+  HPAs (CPU 70%)           api-gateway, wallet-, bet-, query-service: 1-3 replicas
+                           market-service: 2-4 replicas (2+ exercise db-scheduler lock-and-fetch)
   Ingress bet-market       / -> frontend:80 (Traefik); nginx proxies /api and /ws to api-gateway
 ```
 
@@ -1383,8 +1409,13 @@ Namespace bet-market
 - Probes use Spring Boot's `/actuator/health/liveness` and `/readiness` groups, with a startup probe.
 - `scripts/k8s-up.sh` creates a k3d cluster, imports the compose-built images, applies the manifest,
   waits for every pod, and runs `scripts/smoke.sh` through the ingress (`K8S_NAMESPACE` mode).
-- CI runs `scripts/k8s-check.sh`: kubeconform `-strict` plus the ConfigMap byte check.
-- Caveats (retired ingress-nginx, Kafka service links): `docs/caveats/kubernetes.md`.
+- HPA-managed Deployments set no `spec.replicas`, so `kubectl apply` does not reset the HPA's count.
+  k3s ships metrics-server, which feeds the HPAs. `scripts/k8s-up.sh` waits until every HPA reads a CPU value.
+- Consumers that only read Kafka (projection, settlement) get no HPA: their work follows topic lag, not CPU.
+- Postgres runs with `max_connections=250`: DB pods at HPA max + 1 surge, x Hikari pool 10, + Debezium.
+  `scripts/k8s-check.sh` fails when a change breaks this budget.
+- CI runs `scripts/k8s-check.sh`: kubeconform `-strict`, the ConfigMap byte check and the HPA rules.
+- Caveats (retired ingress-nginx, Kafka service links, HPA): `docs/caveats/kubernetes.md`.
 
 ---
 
